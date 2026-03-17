@@ -309,6 +309,154 @@ def make_field(default_val, color, width=80):
 
 
 # ─────────────────────────────────────────────────────────────
+# TXT OFFSET TABLE EXPORT
+# ─────────────────────────────────────────────────────────────
+
+def export_txt(filepath, params, n_stations=20, n_t=32):
+    """Export hull cross-section points as X Y Z for SolidWorks.
+
+    Origin: centre of transom face at mid-height of transom.
+      X  positive forward (bow direction),  0 = transom
+      Y  positive starboard,               0 = centreline
+      Z  positive up,                      0 = transom mid-height
+
+    Each station is written as a closed loop of X Y Z points
+    (starboard arc -> deck -> port arc) separated by a blank line.
+    In SolidWorks use:  Insert > Curve > Curve Through XYZ Points
+    and load one station at a time, or import all as a point cloud.
+    """
+    beam_x, beam_hb, keel_x, keel_d, _, _, _ = build_ctrl(params)
+    bow_r   = params['bow_radius']
+    t_draft = params['transom_draft']
+
+    # Origin in the designer's coordinate system
+    x_orig = float(LWL)
+    z_orig = (float(FREEBOARD) - t_draft) / 2.0   # mid-height of transom
+
+    xs = np.linspace(0.0, float(LWL), n_stations)
+    t  = np.linspace(0.0, np.pi / 2.0, n_t)
+
+    lines = []
+    for xi in xs:
+        hb    = float(beam_eval([xi], beam_x, beam_hb, bow_r)[0])
+        depth = float(lagrange([xi], keel_x, keel_d,
+                               clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
+
+        # Starboard: keel -> waterline (ellipse arc)
+        ys_sub = hb * np.sin(t)
+        zs_sub = -depth * np.cos(t)
+        # Starboard topsides: waterline -> sheer
+        ys_top = np.full(5, hb)
+        zs_top = np.linspace(0.0, float(FREEBOARD), 5)
+        # Deck: stbd sheer -> port sheer
+        ys_dk  = np.linspace(hb, -hb, 7)
+        zs_dk  = np.full(7, float(FREEBOARD))
+        # Port topsides: sheer -> waterline
+        ys_tp  = np.full(5, -hb)
+        zs_tp  = np.linspace(float(FREEBOARD), 0.0, 5)
+        # Port: waterline -> keel (ellipse arc)
+        ys_p   = -hb * np.sin(t[::-1])
+        zs_p   = -depth * np.cos(t[::-1])
+
+        y_all = np.concatenate([ys_sub, ys_top[1:], ys_dk[1:], ys_tp[1:], ys_p[1:]])
+        z_all = np.concatenate([zs_sub, zs_top[1:], zs_dk[1:], zs_tp[1:], zs_p[1:]])
+
+        # Apply origin shift
+        x_sw = x_orig - xi          # positive forward
+        for y, z in zip(y_all, z_all):
+            lines.append(f'{x_sw:.3f}\t{y:.3f}\t{z - z_orig:.3f}')
+        lines.append('')             # blank line between stations
+
+    with open(filepath, 'w') as f:
+        f.write('\n'.join(lines))
+
+
+# ─────────────────────────────────────────────────────────────
+# STL EXPORT  (binary STL, units = mm)
+# ─────────────────────────────────────────────────────────────
+
+def export_stl(filepath, params):
+    """Write a binary STL file of the hull mesh (units: mm).
+    SolidWorks: File > Open, type = STL, set units to mm on import.
+    """
+    verts, faces = build_3d_mesh(params, N_X=120, N_T=48)   # higher res for CAD
+
+    # Compute face normals
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0).astype(np.float32)
+    nlen = np.linalg.norm(normals, axis=1, keepdims=True)
+    nlen[nlen == 0] = 1.0
+    normals /= nlen
+
+    n_tri = len(faces)
+    with open(filepath, 'wb') as f:
+        f.write(b'Moth Hull - exported from moth_designer.py' + b' ' * 38)  # 80-byte header
+        f.write(np.uint32(n_tri).tobytes())
+        for i in range(n_tri):
+            f.write(normals[i].tobytes())          # normal  (3 × float32)
+            f.write(verts[faces[i, 0]].tobytes())  # vertex 1
+            f.write(verts[faces[i, 1]].tobytes())  # vertex 2
+            f.write(verts[faces[i, 2]].tobytes())  # vertex 3
+            f.write(b'\x00\x00')                   # attribute byte count
+
+
+# ─────────────────────────────────────────────────────────────
+# STEP EXPORT  (cadquery / OpenCASCADE, units = mm)
+# ─────────────────────────────────────────────────────────────
+
+def export_step(filepath, params, n_stations=40, n_t=24):
+    """Loft a solid hull through cross-section wires and write a STEP file.
+
+    Each wire is a closed profile in the YZ plane at X=station:
+      starboard ellipse arc → stbd topsides → deck →
+      port topsides → port ellipse arc → keel (closed).
+    """
+    import cadquery as cq
+
+    beam_x, beam_hb, keel_x, keel_d, _, _, _ = build_ctrl(params)
+    bow_r = params['bow_radius']
+
+    # Skip x=0 exactly (degenerate bow point) — start just inside
+    xs = np.linspace(5.0, float(LWL), n_stations)
+
+    wires = []
+    for xi in xs:
+        hb    = max(float(beam_eval([xi], beam_x, beam_hb, bow_r)[0]), 1.0)
+        depth = max(float(lagrange([xi], keel_x, keel_d,
+                                   clip_min=0.0,
+                                   clip_max=float(MAX_DEPTH))[0]), 1.0)
+
+        t = np.linspace(0.0, np.pi / 2, n_t)
+
+        # Starboard submerged ellipse (keel → waterline)
+        ys_s  = hb * np.sin(t);          zs_s  = -depth * np.cos(t)
+        # Stbd topsides (waterline → sheer)
+        ys_ts = np.full(4, hb);          zs_ts = np.linspace(0.0, float(FREEBOARD), 4)
+        # Deck (stbd sheer → port sheer)
+        ys_dk = np.linspace(hb, -hb, 6); zs_dk = np.full(6, float(FREEBOARD))
+        # Port topsides (sheer → waterline)
+        ys_tp = np.full(4, -hb);         zs_tp = np.linspace(float(FREEBOARD), 0.0, 4)
+        # Port submerged ellipse (waterline → keel)
+        ys_p  = -hb * np.sin(t[::-1]);   zs_p  = -depth * np.cos(t[::-1])
+
+        # Join, dropping duplicate junction points.
+        # ys_p[-1] == ys_s[0] (both are the keel) — exclude it since
+        # periodic=True closes the spline automatically.
+        y_all = np.concatenate([ys_s, ys_ts[1:], ys_dk[1:], ys_tp[1:], ys_p[1:-1]])
+        z_all = np.concatenate([zs_s, zs_ts[1:], zs_dk[1:], zs_tp[1:], zs_p[1:-1]])
+
+        pts  = [cq.Vector(float(xi), float(y), float(z))
+                for y, z in zip(y_all, z_all)]
+        edge = cq.Edge.makeSpline(pts, periodic=True)
+        wires.append(cq.Wire.assembleEdges([edge]))
+
+    solid = cq.Solid.makeLoft(wires, ruled=False)
+    cq.exporters.export(solid, filepath)
+
+
+# ─────────────────────────────────────────────────────────────
 # 3-D VIEW WINDOW
 # ─────────────────────────────────────────────────────────────
 
@@ -636,6 +784,57 @@ class MothDesigner(QMainWindow):
         cfg_btn.clicked.connect(self._print_config)
         outer.addWidget(cfg_btn)
 
+        # ── Export TXT button ────────────────────────────────
+        txt_btn = QPushButton('Export XYZ Points  (SolidWorks curves)')
+        txt_btn.setStyleSheet("""
+            QPushButton {
+                background: #141d30;
+                color: #c8d6e5;
+                border: 1px solid #1e2d45;
+                border-radius: 5px;
+                padding: 7px;
+                font-size: 10px;
+            }
+            QPushButton:hover   { background: #1e2d45; border-color: #2e4466; }
+            QPushButton:pressed { background: #253550; }
+        """)
+        txt_btn.clicked.connect(self._export_txt)
+        outer.addWidget(txt_btn)
+
+        # ── Export STL button ────────────────────────────────
+        stl_btn = QPushButton('Export STL  (SolidWorks / CAD)')
+        stl_btn.setStyleSheet("""
+            QPushButton {
+                background: #141d30;
+                color: #c8d6e5;
+                border: 1px solid #1e2d45;
+                border-radius: 5px;
+                padding: 7px;
+                font-size: 10px;
+            }
+            QPushButton:hover   { background: #1e2d45; border-color: #2e4466; }
+            QPushButton:pressed { background: #253550; }
+        """)
+        stl_btn.clicked.connect(self._export_stl)
+        outer.addWidget(stl_btn)
+
+        # ── Export STEP button ───────────────────────────────
+        step_btn = QPushButton('Export STEP  (SolidWorks solid)')
+        step_btn.setStyleSheet("""
+            QPushButton {
+                background: #141d30;
+                color: #c8d6e5;
+                border: 1px solid #1e2d45;
+                border-radius: 5px;
+                padding: 7px;
+                font-size: 10px;
+            }
+            QPushButton:hover   { background: #1e2d45; border-color: #2e4466; }
+            QPushButton:pressed { background: #253550; }
+        """)
+        step_btn.clicked.connect(self._export_step)
+        outer.addWidget(step_btn)
+
         # ── Reset button ────────────────────────────────────
         reset_btn = QPushButton('Reset to Defaults')
         reset_btn.setStyleSheet("""
@@ -793,6 +992,43 @@ class MothDesigner(QMainWindow):
         self._3d_win.refresh(dict(self.params))
         self._3d_win.show()
         self._3d_win.raise_()
+
+    def _export_txt(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export XYZ Points', 'moth_hull_xyz.txt',
+            'Text files (*.txt)')
+        if not path:
+            return
+        export_txt(path, dict(self.params))
+        self.status.showMessage(f'Exported: {path}', 5000)
+
+    def _export_stl(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export STL', 'moth_hull.stl', 'STL files (*.stl)')
+        if not path:
+            return
+        export_stl(path, dict(self.params))
+        self.status.showMessage(f'Exported: {path}', 5000)
+
+    def _export_step(self):
+        from PyQt5.QtWidgets import QFileDialog
+        try:
+            import cadquery  # noqa — just check it's available
+        except ImportError:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Missing library',
+                                'cadquery not installed.\n\nRun:  pip install cadquery')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export STEP', 'moth_hull.step', 'STEP files (*.step *.stp)')
+        if not path:
+            return
+        self.status.showMessage('Generating STEP — please wait...', 0)
+        QApplication.processEvents()
+        export_step(path, dict(self.params))
+        self.status.showMessage(f'Exported: {path}', 5000)
 
     def _print_config(self):
         p = self.params
