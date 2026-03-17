@@ -1,4 +1,4 @@
-# Moved to moth_designer/app.py — run via run.py instead.
+"""Launch the Moth Hull Designer."""
 from moth_designer.app import main
 
 if __name__ == '__main__':
