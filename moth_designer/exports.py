@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────
 
 import numpy as np
-from config   import LWL, MAX_DEPTH, FREEBOARD
+from .config  import LWL, MAX_DEPTH, FREEBOARD
 from .geometry import build_ctrl, build_3d_mesh, beam_eval, lagrange, cross_section
 
 

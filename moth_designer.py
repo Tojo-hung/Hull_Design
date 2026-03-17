@@ -1,5 +1,0 @@
-# Moved to moth_designer/app.py — run via run.py instead.
-from moth_designer.app import main
-
-if __name__ == '__main__':
-    main()
