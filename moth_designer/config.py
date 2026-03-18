@@ -23,21 +23,29 @@ N_SEC = len(SECTION_COLORS)
 # Paste this block into config.py to restore a saved design.
 # Replace lines  _PT = [  ...  through  DEFAULTS[f'p{_i}_kw'] = ...
 # ================================================================
+#
+# Based on design recommendations:
+#   - Max half-beam 240 mm (48 cm) at 76 cm fwd of transom (x=2595)
+#   - Max draft at 103 cm fwd of transom (x=2325), pronounced aft rocker
+#   - Elliptical/V sections forward, full U-shaped at max section
+#   - V-shaped stern (~30% transom area vs main section)
+#   - Deck height > 250 mm at midship
+#
 _PT = [
-    (  335,   80,   20),   # Pt 1
-    ( 1000,  200,   32),   # Pt 2
-    ( 1800,  200,   38),   # Pt 3
-    ( 2281,  200,   37),   # Pt 4
-    ( 2851,  200,   34),   # Pt 5
+    (  335,   90,   80),   # Pt 1
+    ( 1100,  200,  140),   # Pt 2
+    ( 1700,  260,  160),   # Pt 3
+    ( 2300,  280,  150),   # Pt 4
+    ( 2850,  285,  110),   # Pt 5
 ]
-DEFAULTS = dict(transom_half_beam=180.0, transom_draft=25.0,
-                transom_sheer=100.0, transom_keel_w=75.0,
-                bow_draft=0.0, bow_sheer=100.0)
+DEFAULTS = dict(transom_half_beam=330.0, transom_draft=75.0,
+                transom_sheer=150.0, transom_keel_w=100.0,
+                bow_draft=70.0, bow_sheer=150.0)
 for _i, (_px, _pb, _pd) in enumerate(_PT, 1):
     DEFAULTS[f'p{_i}_x']  = float(_px)
     DEFAULTS[f'p{_i}_hb'] = float(_pb)
     DEFAULTS[f'p{_i}_d']  = float(_pd)
-    DEFAULTS[f'p{_i}_dw'] = [50, 200, 200, 200, 200][_i-1]
-    DEFAULTS[f'p{_i}_dz'] = [100, 100, 100, 100, 100][_i-1]
-    DEFAULTS[f'p{_i}_kw'] = [100, 100, 100, 100, 100][_i-1]
+    DEFAULTS[f'p{_i}_dw'] = [70, 210, 280, 310, 300][_i-1]
+    DEFAULTS[f'p{_i}_dz'] = [150, 150, 150, 150, 150][_i-1]
+    DEFAULTS[f'p{_i}_kw'] = [1, 50, 40, 50, 175][_i-1]
 # ================================================================

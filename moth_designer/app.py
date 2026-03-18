@@ -27,12 +27,12 @@ except ImportError:
     sys.exit(1)
 
 from .config import (
-    LWL, MAX_DEPTH, TARGET_DISP_L,
+    LWL, MAX_DEPTH, FREEBOARD, TARGET_DISP_L,
     WL_COLORS, N_WL, SECTION_COLORS, N_SEC,
     DEFAULTS,
 )
 from .geometry import (
-    lagrange, cross_section, build_ctrl, beam_eval,
+    lagrange, cross_section, cross_section_spline, build_ctrl, beam_eval,
     displaced_volume, find_disp_waterline, build_3d_mesh,
 )
 from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
@@ -271,8 +271,12 @@ class MothDesigner(QMainWindow):
         super().__init__()
         self.params       = {k: float(v) for k, v in DEFAULTS.items()}
         self.inputs       = {}
-        self._3d_win      = None
-        self._theme_name  = 'dark'
+        self._3d_win        = None
+        self._ref_img_item  = None
+        self._plan_img_item = None
+        self._theme_name   = 'dark'
+        self._measure_on   = False
+        self._mouse_proxy  = None
         self._setup_window()
         self._setup_plot_items()
         self._redraw()
@@ -526,6 +530,11 @@ class MothDesigner(QMainWindow):
         outer.addWidget(make_btn('Upload DXF -> Onshape',              True,  self._upload_to_onshape))
         outer.addWidget(make_btn('Export Lines Plan DXF  (reference)', False, self._export_dxf_lines_plan))
         outer.addWidget(make_btn('Reset to Defaults',                  False, self._reset))
+        outer.addWidget(make_btn('Measure Distance',                   False, self._toggle_measure))
+        outer.addWidget(make_btn('Load Profile Ref Image',             False, self._load_ref_image))
+        outer.addWidget(make_btn('Clear Profile Ref Image',            False, self._clear_ref_image))
+        outer.addWidget(make_btn('Load Plan Ref Image',                False, self._load_plan_ref_image))
+        outer.addWidget(make_btn('Clear Plan Ref Image',               False, self._clear_plan_ref_image))
         outer.addWidget(make_btn(
             'Switch to Light Mode' if self._theme_name == 'dark' else 'Switch to Dark Mode',
             False, self._toggle_theme))
@@ -621,13 +630,22 @@ class MothDesigner(QMainWindow):
                          for j in range(N_WL)]
         self._pl_wl_p = [pg.PlotDataItem(pen=mk(WL_COLORS[j], width=1))
                          for j in range(N_WL)]
+        # 3 above-waterline deck sections (topside slices, positive Z)
+        _aw_colors = ['#ff9955', '#ff6622', '#ff2200']
+        self._pl_aw_s = [pg.PlotDataItem(pen=mk(c, width=1)) for c in _aw_colors]
+        self._pl_aw_p = [pg.PlotDataItem(pen=mk(c, width=1)) for c in _aw_colors]
         for item in ([self._pl_fill, self._pl_stbd, self._pl_port,
                       self._pl_transom, self._pl_ctrl_s, self._pl_ctrl_p]
-                     + self._pl_labels + self._pl_wl_s + self._pl_wl_p):
+                     + self._pl_labels + self._pl_wl_s + self._pl_wl_p
+                     + self._pl_aw_s + self._pl_aw_p):
             self.plot_plan.addItem(item)
 
-        self._b_sections = [pg.PlotDataItem(pen=mk(SECTION_COLORS[i], width=1.6))
-                            for i in range(N_SEC)]
+        # 5 sections at the internal control points (p1–p5); colours spread across palette
+        _n_body = 5
+        _body_cols = [SECTION_COLORS[int(i * (len(SECTION_COLORS) - 1) / (_n_body - 1))]
+                      for i in range(_n_body)]
+        self._b_sections = [pg.PlotDataItem(pen=mk(_body_cols[i], width=1.8))
+                            for i in range(_n_body)]
         self._b_wl       = pg.InfiniteLine(pos=0, angle=0,
                                             pen=mk('#4488cc', width=1,
                                                    style=Qt.DashLine))
@@ -638,6 +656,124 @@ class MothDesigner(QMainWindow):
         for item in (self._b_sections
                      + [self._b_wl, self._b_center, self._b_transom]):
             self.plot_body.addItem(item)
+
+        # ── Measurement cursor (profile plot) ─────────────────
+        self._meas_vline = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen('#ffdd00', width=1.5, style=Qt.DashLine))
+        self._meas_lbl_bow   = pg.TextItem('', color='#ffdd00', anchor=(0, 1))
+        self._meas_lbl_stern = pg.TextItem('', color='#ffdd00', anchor=(1, 1))
+        for item in (self._meas_vline, self._meas_lbl_bow, self._meas_lbl_stern):
+            item.setVisible(False)
+            self.plot_prof.addItem(item)
+
+    # ── Measurement tool ──────────────────────────────────────
+
+    def _toggle_measure(self):
+        self._measure_on = not self._measure_on
+        if self._measure_on:
+            self._mouse_proxy = pg.SignalProxy(
+                self.plot_prof.scene().sigMouseMoved,
+                rateLimit=60, slot=self._on_mouse_moved)
+            self.status.showMessage(
+                'Measure mode ON  —  hover over the profile view', 0)
+        else:
+            if self._mouse_proxy:
+                self._mouse_proxy.disconnect()
+                self._mouse_proxy = None
+            for item in (self._meas_vline,
+                         self._meas_lbl_bow, self._meas_lbl_stern):
+                item.setVisible(False)
+            self.status.showMessage('Measure mode OFF', 3000)
+
+    def _on_mouse_moved(self, evt):
+        pos = evt[0]
+        if not self.plot_prof.sceneBoundingRect().contains(pos):
+            return
+        mp = self.plot_prof.getPlotItem().vb.mapSceneToView(pos)
+        x = float(mp.x())
+        x = max(0.0, min(float(LWL), x))
+        z = float(mp.y())
+
+        self._meas_vline.setPos(x)
+        self._meas_vline.setVisible(True)
+
+        from_bow   = x
+        to_stern   = float(LWL) - x
+
+        self._meas_lbl_bow.setText(f'from bow\n{from_bow:.0f} mm')
+        self._meas_lbl_bow.setPos(x, z)
+        self._meas_lbl_bow.setVisible(True)
+
+        self._meas_lbl_stern.setText(f'to stern\n{to_stern:.0f} mm')
+        self._meas_lbl_stern.setPos(x, z)
+        self._meas_lbl_stern.setVisible(True)
+
+        self.status.showMessage(
+            f'X from bow: {from_bow:.1f} mm   |   X to stern: {to_stern:.1f} mm   |   Z: {z:.1f} mm')
+
+    # ── Reference image overlay ───────────────────────────────
+
+    def _load_image_into_plot(self, plot, x0, y0, x1, y1):
+        """Open a file dialog, load an image and overlay it on `plot`
+        scaled to data coordinates (x0,y0)–(x1,y1). Returns the
+        ImageItem, or None if the user cancelled."""
+        from PyQt5.QtWidgets import QFileDialog
+        from PyQt5.QtGui import QImage
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Load Reference Image', '',
+            'Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)')
+        if not path:
+            return None
+
+        qimg = QImage(path).convertToFormat(QImage.Format_RGBA8888)
+        w, h = qimg.width(), qimg.height()
+        ptr = qimg.bits()
+        ptr.setsize(h * w * 4)
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, w, 4)).copy()
+        arr[:, :, 3] = (arr[:, :, 3] * 0.45).astype(np.uint8)
+        arr = arr[::-1]               # flip rows: pyqtgraph y=0 at bottom
+        arr = arr.transpose(1, 0, 2)  # -> (width, height, channels)
+
+        item = pg.ImageItem(arr)
+        sx = (x1 - x0) / w
+        sy = (y1 - y0) / h
+        tr = pg.QtGui.QTransform()
+        tr.translate(x0, y0)
+        tr.scale(sx, sy)
+        item.setTransform(tr)
+        item.setZValue(-10)
+        plot.addItem(item)
+        self.status.showMessage(f'Reference image loaded: {path}', 4000)
+        return item
+
+    def _load_ref_image(self):
+        self._clear_ref_image()
+        # Profile view: X = 0→LWL, Z = -MAX_DEPTH→+FREEBOARD
+        self._ref_img_item = self._load_image_into_plot(
+            self.plot_prof,
+            0.0, -float(MAX_DEPTH),
+            float(LWL), float(FREEBOARD))
+
+    def _clear_ref_image(self):
+        if self._ref_img_item is not None:
+            self.plot_prof.removeItem(self._ref_img_item)
+            self._ref_img_item = None
+
+    def _load_plan_ref_image(self):
+        self._clear_plan_ref_image()
+        # Plan view: X = 0→LWL, Y = -max_hb→+max_hb
+        max_hb = float(max(self.params[f'p{i}_hb'] for i in range(1, 6)))
+        max_hb = max(max_hb, float(self.params['transom_half_beam'])) * 1.05
+        self._plan_img_item = self._load_image_into_plot(
+            self.plot_plan,
+            0.0, -max_hb,
+            float(LWL), max_hb)
+
+    def _clear_plan_ref_image(self):
+        if self._plan_img_item is not None:
+            self.plot_plan.removeItem(self._plan_img_item)
+            self._plan_img_item = None
 
     # ── Theme toggle ──────────────────────────────────────────
 
@@ -886,44 +1022,78 @@ class MothDesigner(QMainWindow):
                 self._pl_wl_s[ji].setData([], [])
                 self._pl_wl_p[ji].setData([], [])
 
+        # Above-waterline deck sections (positive Z, up to sheer)
+        max_sheer = float(np.max(sheer_s_arr))
+        z_above = np.linspace(max_sheer * 0.2, max_sheer * 0.88, 3)
+        for ji, zl in enumerate(z_above):
+            px, py = [], []
+            for si, xi in enumerate(x_s):
+                ys, zs = cross_section(hb_s[si], depth_s[si], dhb_s[si],
+                                       sheer_s_arr[si], keelw_s[si], 50)
+                for k in range(len(zs) - 1):
+                    if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
+                        f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
+                        px.append(xi)
+                        py.append(float(ys[k] + f * (ys[k + 1] - ys[k])))
+                        break
+            if px:
+                self._pl_aw_s[ji].setData(px, py)
+                self._pl_aw_p[ji].setData(px, [-y for y in py])
+            else:
+                self._pl_aw_s[ji].setData([], [])
+                self._pl_aw_p[ji].setData([], [])
+
         # ── Body plan ───────────────────────────────────────
-        sec_fracs = (np.arange(N_SEC) + 0.5) / N_SEC
-        sec_xs    = sec_fracs * LWL
+        # Stations at the 5 internal control-point X positions (skip bow=0 and stern=LWL)
+        sec_xs    = ctrl_x[1:-1]
         sec_hb    = beam_eval(sec_xs, ctrl_x, beam_hb)
         sec_depth = lagrange(sec_xs, ctrl_x, keel_d,    clip_min=0.0, clip_max=float(MAX_DEPTH))
         sec_dhb   = lagrange(sec_xs, ctrl_x, deck_hb_c, clip_min=0.0)
         sec_dz    = lagrange(sec_xs, ctrl_x, sheer_z_c, clip_min=0.0)
         sec_kw    = lagrange(sec_xs, ctrl_x, keel_w_c,  clip_min=0.0)
-        for i in range(N_SEC):
-            ys, zs = cross_section(sec_hb[i], sec_depth[i], sec_dhb[i],
-                                   sec_dz[i], sec_kw[i], 40)
-            if sec_fracs[i] <= 0.5:
-                self._b_sections[i].setData(ys, zs)
+        mid_x = float(LWL) / 2.0
+        for i in range(len(sec_xs)):
+            ys, zs = cross_section_spline(sec_hb[i], sec_depth[i],
+                                          sec_dhb[i], sec_dz[i], sec_kw[i], 80)
+            if sec_xs[i] <= mid_x:
+                self._b_sections[i].setData(ys, zs)    # forward → starboard (right)
             else:
-                self._b_sections[i].setData(-ys, zs)
+                self._b_sections[i].setData(-ys, zs)   # aft → port (left)
 
         t_kw = p['transom_keel_w']
         ty_tr, tz_tr = cross_section(t_hb, t_draft, t_hb, t_sheer, t_kw, 40)
         self._b_transom.setData(-ty_tr, tz_tr)
 
         # ── Displacement waterline ──────────────────────────
-        dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d)
+        deck_kw = dict(deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
+                       sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c)
+
+        # Total hull volume: integrate up to the highest sheer point
+        max_sheer_z = float(np.max(sheer_z_c))
+        total_vol = displaced_volume(max_sheer_z, ctrl_x, beam_hb,
+                                     ctrl_x, keel_d, **deck_kw)
+
+        # Waterline z where cumulative volume (from keel up) = target
+        dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
+                                 ctrl_x, keel_d, **deck_kw)
+
         self._p_disp_wl.setPos(dz)
-        max_vol = displaced_volume(0.0, ctrl_x, beam_hb, ctrl_x, keel_d)
-        if max_vol < TARGET_DISP_L:
-            lbl_txt = f'{TARGET_DISP_L} L  (hull only {max_vol:.0f} L — too small)'
+        if total_vol < TARGET_DISP_L:
+            lbl_txt = (f'{TARGET_DISP_L} L  '
+                       f'(total hull only {total_vol:.0f} L — too small)')
         else:
-            lbl_txt = f'{TARGET_DISP_L} L  (z={dz:.1f} mm)'
+            above = ' (above DWL)' if dz > 0 else ''
+            lbl_txt = f'{TARGET_DISP_L} L  z={dz:.1f} mm{above}'
         self._p_disp_lbl.setText(lbl_txt)
         self._p_disp_lbl.setPos(LWL * 0.6, dz)
 
         self.status.showMessage(
             f'Max beam: {2 * float(np.max(beam_arr)):.0f} mm   '
             f'Max depth: {float(np.max(depth_arr)):.0f} mm   '
-            f'Transom: {2*t_hb:.0f} wide × {t_draft:.0f} deep   '
-            f'LWL: {LWL} mm  (fixed)   '
-            f'Hull vol: {max_vol:.1f} L   '
-            f'{TARGET_DISP_L} L waterline: z={dz:.1f} mm'
+            f'Transom: {2*t_hb:.0f} wide x {t_draft:.0f} deep   '
+            f'LWL: {LWL} mm   '
+            f'Total hull vol: {total_vol:.1f} L   '
+            f'{TARGET_DISP_L} L draft: z={dz:.1f} mm'
         )
 
 

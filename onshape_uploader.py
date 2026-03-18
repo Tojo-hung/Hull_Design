@@ -187,8 +187,10 @@ def generate_featurescript(stations, did, doc_name):
         'export const hullPlanes = defineFeature(function(context is Context,',
         '                                                  id is Id,',
         '                                                  definition is map)',
+        'precondition',
         '{',
-        '    const frontPlane = qBuiltinPart(BuiltInType.FRONT_PLANE);',
+        '}',
+        '{',
     ]
 
     for i, (idx, x_mm, fname) in enumerate(stations):
@@ -196,8 +198,8 @@ def generate_featurescript(stations, did, doc_name):
         lines.append(f'')
         lines.append(f'    // Station {idx}: X = {x_mm} mm  ({fname})')
         lines.append(f'    opPlane(context, id + "{plane_id}", {{')
-        lines.append(f'        "plane" : plane(vector(0, 0, {x_mm}) * millimeter,')
-        lines.append(f'                         Z_VEC),')
+        lines.append(f'        "plane" : plane(vector({x_mm}, 0, 0) * millimeter,')
+        lines.append(f'                         vector(1, 0, 0)),')
         lines.append(f'    }});')
 
     lines += [

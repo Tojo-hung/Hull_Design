@@ -54,6 +54,69 @@ def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40):
             np.concatenate([z_sub, z_top[1:]]))
 
 
+def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80):
+    """
+    Parametric cubic spline cross-section through the three structural points:
+      keel (0, -depth)  →  half-beam (hb, 0)  →  deck edge (deck_hb, deck_z)
+
+    A flat keel of width keel_w is prepended when keel_w > 0.
+    Enforces a vertical tangent at the keel centreline (dy/dt = 0 at t=0)
+    so the curve meets the symmetry plane smoothly.
+    """
+    from scipy.interpolate import CubicSpline
+
+    hb     = max(float(hb),    0.0)
+    depth  = max(float(depth), 0.0)
+    keel_w = min(max(float(keel_w), 0.0), hb)
+    if deck_hb is None: deck_hb = hb
+    if deck_z  is None: deck_z  = float(FREEBOARD)
+    deck_hb = max(float(deck_hb), 0.0)
+    deck_z  = max(float(deck_z),  0.0)
+
+    # Degenerate (bow/zero-beam) — return a vertical centreline stroke
+    if hb < 0.5:
+        return np.array([0.0, 0.0]), np.array([-depth, deck_z])
+
+    # Structural knot points
+    if keel_w > 0:
+        key_y = np.array([0.0, keel_w, hb, deck_hb])
+        key_z = np.array([-depth, -depth, 0.0, deck_z])
+    else:
+        key_y = np.array([0.0, hb, deck_hb])
+        key_z = np.array([-depth, 0.0, deck_z])
+
+    # Chord-length parameterisation
+    pts   = np.column_stack([key_y, key_z])
+    chords = np.sqrt(((np.diff(pts, axis=0)) ** 2).sum(axis=1))
+    t      = np.concatenate([[0.0], np.cumsum(chords)])
+    t     /= t[-1]
+
+    # Spline for y: enforce dy/dt = 0 at the keel (vertical tangent → bilateral symmetry)
+    cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), 'not-a-knot'))
+    cs_z = CubicSpline(t, key_z, bc_type='natural')
+
+    # Dense sampling — give the flat keel its own segment
+    if keel_w > 0:
+        t_flat = t[1]
+        n_flat = max(n // 8, 3)
+        t_bilge = np.linspace(t_flat, 1.0, n - n_flat + 1)
+        t_dense = np.concatenate([np.linspace(0.0, t_flat, n_flat),
+                                  t_bilge[1:]])
+    else:
+        t_dense = np.linspace(0.0, 1.0, n)
+
+    ys = cs_y(t_dense)
+    zs = cs_z(t_dense)
+
+    # Hard-clamp the flat keel so it stays truly flat
+    if keel_w > 0:
+        flat = t_dense <= t[1] + 1e-9
+        ys[flat] = np.linspace(0.0, keel_w, flat.sum())
+        zs[flat] = -depth
+
+    return np.clip(ys, 0.0, None), zs
+
+
 def build_ctrl(p):
     """Build PCHIP control arrays from the parameter dict."""
     t_hb    = p['transom_half_beam']
@@ -86,42 +149,97 @@ def beam_eval(x_eval, beam_x, beam_hb):
 
 # ─── Displacement hydrostatics ────────────────────────────────
 
-def _section_area(hb, depth, z_wl):
-    """Submerged cross-section area (both sides) below z_wl."""
-    if hb <= 0 or depth <= 0:
+def _section_area_half_below(ys, zs, z_wl):
+    """Shoelace area of the half cross-section polygon below z_wl (mm²).
+    Works for any z_wl — below keel, between keel and sheer, or above sheer."""
+    z_wl = float(z_wl)
+    if z_wl <= float(zs[0]):
         return 0.0
-    if z_wl <= -depth:
-        return 0.0
-    if z_wl >= 0:
-        return np.pi / 2 * hb * depth
-    cos_t0 = np.clip(-z_wl / depth, 0.0, 1.0)
-    t0 = np.arccos(cos_t0)
-    return 2.0 * hb * depth * (t0 / 2.0 - np.sin(2.0 * t0) / 4.0)
+
+    if z_wl >= float(zs[-1]):
+        poly_y = list(ys) + [0.0]
+        poly_z = list(zs) + [float(zs[-1])]
+    else:
+        poly_y, poly_z = [], []
+        for i in range(len(zs)):
+            if float(zs[i]) <= z_wl:
+                poly_y.append(float(ys[i]))
+                poly_z.append(float(zs[i]))
+            else:
+                dz = float(zs[i]) - float(zs[i - 1]) + 1e-12
+                f  = (z_wl - float(zs[i - 1])) / dz
+                poly_y.append(float(ys[i - 1]) + f * (float(ys[i]) - float(ys[i - 1])))
+                poly_z.append(z_wl)
+                break
+        poly_y.append(0.0)
+        poly_z.append(z_wl)
+
+    py = np.array(poly_y + [poly_y[0]])
+    pz = np.array(poly_z + [poly_z[0]])
+    return 0.5 * abs(float(np.sum(py[:-1] * pz[1:] - py[1:] * pz[:-1])))
 
 
-def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d, n_x=200):
-    """Volume (litres) displaced below waterline z_wl (z_wl <= 0)."""
-    x_arr = np.linspace(0.0, float(LWL), n_x)
+def section_area_full(hb, depth, deck_hb, deck_z, keel_w, z_wl, n=60):
+    """Full cross-section area (both sides) below z_wl (mm²).
+    Includes the topside region above z=0 up to the deck edge."""
+    ys, zs = cross_section(hb, depth, deck_hb, deck_z, keel_w, n)
+    return 2.0 * _section_area_half_below(ys, zs, z_wl)
+
+
+def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d,
+                     deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
+                     keel_w_arr=None, n_x=200):
+    """Volume (litres) enclosed by the hull below z_wl.
+    Pass deck_x/deck_hb_arr/sheer_z_arr/keel_w_arr to include topsides above z=0."""
+    x_arr  = np.linspace(0.0, float(LWL), n_x)
     hbs    = beam_eval(x_arr, beam_x, beam_hb)
     depths = lagrange(x_arr, keel_x, keel_d,
                       clip_min=0.0, clip_max=float(MAX_DEPTH))
-    areas = np.array([_section_area(hbs[k], depths[k], z_wl)
-                      for k in range(n_x)])
+
+    if deck_x is not None:
+        dhbs  = lagrange(x_arr, deck_x, deck_hb_arr,  clip_min=0.0)
+        sheer = lagrange(x_arr, deck_x, sheer_z_arr,  clip_min=0.0)
+        kw    = lagrange(x_arr, deck_x, keel_w_arr,   clip_min=0.0)
+        areas = np.array([section_area_full(hbs[k], depths[k],
+                                            dhbs[k], sheer[k], kw[k], z_wl)
+                          for k in range(n_x)])
+    else:
+        # Legacy fast path: ellipse-only, below z=0
+        from scipy.interpolate import PchipInterpolator  # noqa (already imported via lagrange)
+        def _legacy(hb, depth, z):
+            if hb <= 0 or depth <= 0 or z <= -depth:
+                return 0.0
+            if z >= 0:
+                return np.pi / 2 * hb * depth
+            cos_t0 = np.clip(-z / depth, 0.0, 1.0)
+            t0 = np.arccos(cos_t0)
+            return 2.0 * hb * depth * (t0 / 2.0 - np.sin(2.0 * t0) / 4.0)
+        areas = np.array([_legacy(hbs[k], depths[k], z_wl) for k in range(n_x)])
+
     return float(np.trapezoid(areas, x_arr)) / 1e6
 
 
-def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d):
-    """Bisect to find z_wl (mm, <=0) where displaced_volume == target_l."""
-    lo, hi = -float(MAX_DEPTH), 0.0
-    vol_hi = displaced_volume(hi, beam_x, beam_hb, keel_x, keel_d)
+def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
+                        deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
+                        keel_w_arr=None):
+    """Bisect to find z_wl where displaced_volume == target_l.
+    When deck params are supplied the search extends up to the maximum sheer height."""
+    kw = dict(deck_x=deck_x, deck_hb_arr=deck_hb_arr,
+              sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr)
+
+    lo = -float(MAX_DEPTH)
+    hi = float(np.max(sheer_z_arr)) if sheer_z_arr is not None else 0.0
+
+    vol_hi = displaced_volume(hi, beam_x, beam_hb, keel_x, keel_d, **kw)
     if vol_hi <= target_l:
-        return hi
-    vol_lo = displaced_volume(lo, beam_x, beam_hb, keel_x, keel_d)
+        return hi           # target exceeds total hull volume
+    vol_lo = displaced_volume(lo, beam_x, beam_hb, keel_x, keel_d, **kw)
     if vol_lo >= target_l:
         return lo
-    for _ in range(40):
+
+    for _ in range(42):
         mid = (lo + hi) / 2.0
-        if displaced_volume(mid, beam_x, beam_hb, keel_x, keel_d) < target_l:
+        if displaced_volume(mid, beam_x, beam_hb, keel_x, keel_d, **kw) < target_l:
             lo = mid
         else:
             hi = mid

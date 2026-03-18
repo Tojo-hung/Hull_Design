@@ -108,7 +108,7 @@ def export_step(filepath, params, n_stations=40, n_t=24):
     cq.exporters.export(solid, filepath)
 
 
-def export_dxf_sections(filepath_or_folder, params, n_pts=60,
+def export_dxf_sections(filepath_or_folder, params, n_pts=20,
                         single_file=False):
     """
     Export cross-section curves as DXF for Onshape sketch import.
