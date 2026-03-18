@@ -42,15 +42,64 @@ from .exports import export_txt, export_stl, export_step, export_dxf_sections, e
 # DARK THEME
 # ─────────────────────────────────────────────────────────────
 
-def apply_dark_theme(app):
-    app.setStyle('Fusion')
+THEMES = {
+    'dark': {
+        'field_bg':       '#141d30',
+        'field_bg_focus': '#1a2640',
+        'field_border':   '#1e2d45',
+        'box_bg':         '#0d1525',
+        'box_border':     '#1e2d45',
+        'btn_primary_bg': '#0d2a4a',
+        'btn_primary_fg': '#4db8ff',
+        'btn_primary_bd': '#1e5080',
+        'btn_secondary_bg': '#141d30',
+        'btn_secondary_bd': '#1e2d45',
+        'btn_secondary_fg': '#c8d6e5',
+        'btn_hover':      '#1e2d45',
+        'btn_hover_bd':   '#2e4466',
+        'btn_pressed':    '#253550',
+        'hint_color':     '#3d5068',
+        'plot_bg':        '#0b1020',
+        'plot_fg':        '#7a8fa8',
+        'plot_axis':      '#1e2d45',
+        'status_color':   '#7a8fa8',
+        'sec_label':      '#c8d6e5',
+    },
+    'light': {
+        'field_bg':       '#ffffff',
+        'field_bg_focus': '#f0f6ff',
+        'field_border':   '#b0c0d0',
+        'box_bg':         '#f0f4f8',
+        'box_border':     '#c0ccd8',
+        'btn_primary_bg': '#1a6fc4',
+        'btn_primary_fg': '#ffffff',
+        'btn_primary_bd': '#1258a0',
+        'btn_secondary_bg': '#e8eef4',
+        'btn_secondary_bd': '#b0c0d0',
+        'btn_secondary_fg': '#0d1b2a',
+        'btn_hover':      '#d0dce8',
+        'btn_hover_bd':   '#90a8c0',
+        'btn_pressed':    '#b8cce0',
+        'hint_color':     '#4a5a6a',
+        'plot_bg':        '#ffffff',
+        'plot_fg':        '#1a2535',
+        'plot_axis':      '#b0bfcc',
+        'status_color':   '#1a2535',
+        'sec_label':      '#0d1b2a',
+    },
+}
+
+
+def _build_palette(dark: bool) -> QPalette:
     p = QPalette()
-    bg      = QColor(10,  14,  23)
-    panel   = QColor(13,  18,  32)
-    text    = QColor(200, 214, 229)
-    muted   = QColor(80,  100, 120)
-    accent  = QColor(30,  144, 255)
-    btn     = QColor(26,  34,  53)
+    if dark:
+        bg    = QColor(10,  14,  23);  panel = QColor(13,  18,  32)
+        text  = QColor(200, 214, 229); muted = QColor(80,  100, 120)
+        acc   = QColor(30,  144, 255); btn   = QColor(26,  34,  53)
+    else:
+        bg    = QColor(240, 244, 248); panel = QColor(255, 255, 255)
+        text  = QColor(30,  45,  60);  muted = QColor(130, 150, 170)
+        acc   = QColor(26,  115, 200); btn   = QColor(225, 235, 245)
     p.setColor(QPalette.Window,          bg)
     p.setColor(QPalette.WindowText,      text)
     p.setColor(QPalette.Base,            panel)
@@ -61,27 +110,39 @@ def apply_dark_theme(app):
     p.setColor(QPalette.PlaceholderText, muted)
     p.setColor(QPalette.Button,          btn)
     p.setColor(QPalette.ButtonText,      text)
-    p.setColor(QPalette.BrightText,      QColor(255, 100, 100))
-    p.setColor(QPalette.Highlight,       accent)
-    p.setColor(QPalette.HighlightedText, QColor(0,  0,  0))
+    p.setColor(QPalette.BrightText,      QColor(200, 50, 50))
+    p.setColor(QPalette.Highlight,       acc)
+    p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
     p.setColor(QPalette.Disabled, QPalette.Text,       muted)
     p.setColor(QPalette.Disabled, QPalette.ButtonText, muted)
-    app.setPalette(p)
+    return p
+
+
+def apply_dark_theme(app):
+    app.setStyle('Fusion')
+    app.setPalette(_build_palette(dark=True))
 
 
 # ─────────────────────────────────────────────────────────────
 # INPUT FIELD HELPER
 # ─────────────────────────────────────────────────────────────
 
-def make_field(default_val, color, width=80):
+def make_field(default_val, color, width=80, theme=None):
+    t = theme or THEMES['dark']
     edit = QLineEdit(f'{default_val:.0f}')
     edit.setFixedWidth(width)
     edit.setAlignment(Qt.AlignCenter)
+    edit._accent = color          # remember accent so we can re-theme later
+    _apply_field_style(edit, color, t)
+    return edit
+
+
+def _apply_field_style(edit, color, t):
     edit.setStyleSheet(f"""
         QLineEdit {{
             color: {color};
-            background: #141d30;
-            border: 1px solid #1e2d45;
+            background: {t['field_bg']};
+            border: 1px solid {t['field_border']};
             border-radius: 4px;
             padding: 3px 6px;
             font-size: 11px;
@@ -89,10 +150,9 @@ def make_field(default_val, color, width=80):
         }}
         QLineEdit:focus {{
             border-color: {color};
-            background: #1a2640;
+            background: {t['field_bg_focus']};
         }}
     """)
-    return edit
 
 
 # ─────────────────────────────────────────────────────────────
@@ -209,9 +269,10 @@ class MothDesigner(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.params  = {k: float(v) for k, v in DEFAULTS.items()}
-        self.inputs  = {}
-        self._3d_win = None
+        self.params       = {k: float(v) for k, v in DEFAULTS.items()}
+        self.inputs       = {}
+        self._3d_win      = None
+        self._theme_name  = 'dark'
         self._setup_window()
         self._setup_plot_items()
         self._redraw()
@@ -231,28 +292,32 @@ class MothDesigner(QMainWindow):
         root_layout.setContentsMargins(10, 10, 6, 10)
         root_layout.setSpacing(10)
 
-        root_layout.addWidget(self._build_input_panel(), stretch=0)
-        root_layout.addWidget(self._build_plot_panel(),  stretch=1)
+        self._root_layout  = root_layout
+        self._input_panel  = self._build_input_panel()
+        self._plot_panel   = self._build_plot_panel()
+        root_layout.addWidget(self._input_panel, stretch=0)
+        root_layout.addWidget(self._plot_panel,  stretch=1)
 
         self.status = QStatusBar()
-        self.status.setStyleSheet('color: #7a8fa8; font-size: 10px;')
+        self.status.setStyleSheet(f'color: {THEMES[self._theme_name]["status_color"]}; font-size: 10px;')
         self.setStatusBar(self.status)
 
     # ── Input panel ───────────────────────────────────────────
 
     def _build_input_panel(self):
+        t = THEMES[self._theme_name]
         panel = QWidget()
         panel.setFixedWidth(310)
         outer = QVBoxLayout(panel)
         outer.setSpacing(10)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        box_style = """
-            QFrame {
-                background: #0d1525;
-                border: 1px solid #1e2d45;
+        box_style = f"""
+            QFrame {{
+                background: {t['box_bg']};
+                border: 1px solid {t['box_border']};
                 border-radius: 6px;
-            }
+            }}
         """
 
         # ── Control points ──────────────────────────────────
@@ -263,7 +328,7 @@ class MothDesigner(QMainWindow):
         cp_layout.setSpacing(6)
 
         sec_label = QLabel('CONTROL POINTS')
-        sec_label.setStyleSheet('color: #c8d6e5; font-size: 10px; font-weight: bold;'
+        sec_label.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px; font-weight: bold;'
                                 'border: none; background: transparent;')
         cp_layout.addWidget(sec_label)
 
@@ -301,7 +366,7 @@ class MothDesigner(QMainWindow):
                 ('_d',  '#ff6b6b', 0,   MAX_DEPTH),
             ]:
                 key  = f'p{i}{suffix}'
-                edit = make_field(DEFAULTS[key], color)
+                edit = make_field(DEFAULTS[key], color, theme=t)
                 edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
                 edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
                 self.inputs[key] = edit
@@ -318,7 +383,7 @@ class MothDesigner(QMainWindow):
         dk_layout.setSpacing(6)
 
         dk_title = QLabel('DECK & KEEL  (same X positions as above)')
-        dk_title.setStyleSheet('color: #c8d6e5; font-size: 10px; font-weight: bold;'
+        dk_title.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px; font-weight: bold;'
                                'border: none; background: transparent;')
         dk_layout.addWidget(dk_title)
 
@@ -352,7 +417,7 @@ class MothDesigner(QMainWindow):
                 ('_kw', '#ff6b6b', 0,   200),
             ]:
                 key  = f'p{i}{suffix}'
-                edit = make_field(DEFAULTS[key], color)
+                edit = make_field(DEFAULTS[key], color, theme=t)
                 edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
                 edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
                 self.inputs[key] = edit
@@ -369,7 +434,7 @@ class MothDesigner(QMainWindow):
         tr_layout.setSpacing(6)
 
         tr_title = QLabel('TRANSOM')
-        tr_title.setStyleSheet('color: #c8d6e5; font-size: 10px; font-weight: bold;'
+        tr_title.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px; font-weight: bold;'
                                'border: none; background: transparent;')
         tr_layout.addWidget(tr_title)
 
@@ -384,9 +449,9 @@ class MothDesigner(QMainWindow):
             row = QHBoxLayout(row_w)
             row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label)
-            lbl.setStyleSheet('color: #c8d6e5; font-size: 10px;'
+            lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                               'border: none; background: transparent;')
-            edit = make_field(DEFAULTS[key], '#00d4aa', width=90)
+            edit = make_field(DEFAULTS[key], '#00d4aa', width=90, theme=t)
             edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
             edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
             self.inputs[key] = edit
@@ -404,7 +469,7 @@ class MothDesigner(QMainWindow):
         bw_layout.setSpacing(6)
 
         bw_title = QLabel('BOW')
-        bw_title.setStyleSheet('color: #c8d6e5; font-size: 10px; font-weight: bold;'
+        bw_title.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px; font-weight: bold;'
                                'border: none; background: transparent;')
         bw_layout.addWidget(bw_title)
 
@@ -417,9 +482,9 @@ class MothDesigner(QMainWindow):
             row = QHBoxLayout(row_w)
             row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label)
-            lbl.setStyleSheet('color: #c8d6e5; font-size: 10px;'
+            lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                               'border: none; background: transparent;')
-            edit = make_field(DEFAULTS[key], '#00d4aa', width=90)
+            edit = make_field(DEFAULTS[key], '#00d4aa', width=90, theme=t)
             edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
             edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
             self.inputs[key] = edit
@@ -430,39 +495,46 @@ class MothDesigner(QMainWindow):
         outer.addWidget(bw_box)
 
         # ── Buttons ──────────────────────────────────────────
-        def make_btn(label, color, border, handler):
+        def make_btn(label, primary, handler):
             btn = QPushButton(label)
+            if primary:
+                bg, fg, bd = t['btn_primary_bg'], t['btn_primary_fg'], t['btn_primary_bd']
+            else:
+                bg, fg, bd = t['btn_secondary_bg'], t['btn_secondary_fg'], t['btn_secondary_bd']
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {color};
-                    color: {'#4db8ff' if color == '#0d2a4a' else '#c8d6e5'};
-                    border: 1px solid {border};
+                    background: {bg};
+                    color: {fg};
+                    border: 1px solid {bd};
                     border-radius: 5px;
-                    padding: {'8px' if color == '#0d2a4a' else '7px'};
-                    font-size: {'11px' if color == '#0d2a4a' else '10px'};
-                    {'font-weight: bold;' if color == '#0d2a4a' else ''}
+                    padding: {'8px' if primary else '7px'};
+                    font-size: {'11px' if primary else '10px'};
+                    {'font-weight: bold;' if primary else ''}
                 }}
-                QPushButton:hover   {{ background: #1e2d45; border-color: #2e4466; }}
-                QPushButton:pressed {{ background: #253550; }}
+                QPushButton:hover   {{ background: {t['btn_hover']}; border-color: {t['btn_hover_bd']}; }}
+                QPushButton:pressed {{ background: {t['btn_pressed']}; }}
             """)
             btn.clicked.connect(handler)
             return btn
 
-        outer.addWidget(make_btn('Launch 3D View',                   '#0d2a4a', '#1e5080', self._open_3d_view))
-        outer.addWidget(make_btn('Print Config to Terminal',          '#141d30', '#1e2d45', self._print_config))
-        outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',   '#141d30', '#1e2d45', self._export_txt))
-        outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',    '#141d30', '#1e2d45', self._export_stl))
-        outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',   '#141d30', '#1e2d45', self._export_step))
-        outer.addWidget(make_btn('Export DXF Sections  (Onshape)',    '#0d2a4a', '#006644', self._export_dxf_sections))
-        outer.addWidget(make_btn('Upload DXF → Onshape',              '#0d2a4a', '#006644', self._upload_to_onshape))
-        outer.addWidget(make_btn('Export Lines Plan DXF  (reference)','#141d30', '#1e2d45', self._export_dxf_lines_plan))
-        outer.addWidget(make_btn('Reset to Defaults',                 '#141d30', '#1e2d45', self._reset))
+        outer.addWidget(make_btn('Launch 3D View',                    True,  self._open_3d_view))
+        outer.addWidget(make_btn('Print Config to Terminal',           False, self._print_config))
+        outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',    False, self._export_txt))
+        outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',     False, self._export_stl))
+        outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',    False, self._export_step))
+        outer.addWidget(make_btn('Export DXF Sections  (Onshape)',     True,  self._export_dxf_sections))
+        outer.addWidget(make_btn('Upload DXF -> Onshape',              True,  self._upload_to_onshape))
+        outer.addWidget(make_btn('Export Lines Plan DXF  (reference)', False, self._export_dxf_lines_plan))
+        outer.addWidget(make_btn('Reset to Defaults',                  False, self._reset))
+        outer.addWidget(make_btn(
+            'Switch to Light Mode' if self._theme_name == 'dark' else 'Switch to Dark Mode',
+            False, self._toggle_theme))
 
         hint = QLabel('Press Enter or Tab to update  •  '
                       'Orange = X  •  Blue = beam  •  Red = depth')
         hint.setWordWrap(True)
         hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet('color: #3d5068; font-size: 8px; border: none;')
+        hint.setStyleSheet(f'color: {t["hint_color"]}; font-size: 8px; border: none;')
         outer.addWidget(hint)
 
         outer.addStretch()
@@ -492,7 +564,7 @@ class MothDesigner(QMainWindow):
                 pw.setAspectLocked(True)
             return pw
 
-        self.plot_prof = make_plot('Profile', 'X from bow (mm)', 'Z (mm)')
+        self.plot_prof = make_plot('Profile', 'X from bow (mm)', 'Z (mm)', aspect_locked=True)
         self.plot_plan = make_plot('Plan view — waterlines', 'X from bow (mm)', 'Y (mm)',
                                    aspect_locked=True)
         self.plot_body = make_plot('Body plan  (fwd right  |  aft left)', 'Y (mm)', 'Z (mm)',
@@ -566,6 +638,30 @@ class MothDesigner(QMainWindow):
         for item in (self._b_sections
                      + [self._b_wl, self._b_center, self._b_transom]):
             self.plot_body.addItem(item)
+
+    # ── Theme toggle ──────────────────────────────────────────
+
+    def _toggle_theme(self):
+        self._theme_name = 'light' if self._theme_name == 'dark' else 'dark'
+        # Update Qt palette
+        QApplication.instance().setPalette(_build_palette(self._theme_name == 'dark'))
+        # Rebuild input panel
+        self._root_layout.removeWidget(self._input_panel)
+        self._input_panel.deleteLater()
+        self.inputs = {}
+        self._input_panel = self._build_input_panel()
+        self._root_layout.insertWidget(0, self._input_panel, stretch=0)
+        # Update plot colours
+        t = THEMES[self._theme_name]
+        axis_pen  = pg.mkPen(t['plot_axis'])
+        text_pen  = pg.mkPen(t['plot_fg'])
+        for pw in (self.plot_prof, self.plot_plan, self.plot_body):
+            pw.setBackground(t['plot_bg'])
+            for axis in ('bottom', 'left'):
+                pw.getAxis(axis).setPen(axis_pen)
+                pw.getAxis(axis).setTextPen(text_pen)
+        self.status.setStyleSheet(f'color: {t["status_color"]}; font-size: 10px;')
+        self._redraw()
 
     # ── Callbacks ─────────────────────────────────────────────
 
