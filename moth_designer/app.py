@@ -35,7 +35,7 @@ from .geometry import (
     lagrange, cross_section, build_ctrl, beam_eval,
     displaced_volume, find_disp_waterline, build_3d_mesh,
 )
-from .exports import export_txt, export_stl, export_step
+from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
 
 
 # ─────────────────────────────────────────────────────────────
@@ -453,6 +453,9 @@ class MothDesigner(QMainWindow):
         outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',   '#141d30', '#1e2d45', self._export_txt))
         outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',    '#141d30', '#1e2d45', self._export_stl))
         outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',   '#141d30', '#1e2d45', self._export_step))
+        outer.addWidget(make_btn('Export DXF Sections  (Onshape)',    '#0d2a4a', '#006644', self._export_dxf_sections))
+        outer.addWidget(make_btn('Upload DXF → Onshape',              '#0d2a4a', '#006644', self._upload_to_onshape))
+        outer.addWidget(make_btn('Export Lines Plan DXF  (reference)','#141d30', '#1e2d45', self._export_dxf_lines_plan))
         outer.addWidget(make_btn('Reset to Defaults',                 '#141d30', '#1e2d45', self._reset))
 
         hint = QLabel('Press Enter or Tab to update  •  '
@@ -624,6 +627,59 @@ class MothDesigner(QMainWindow):
         self.status.showMessage('Generating STEP — please wait...', 0)
         QApplication.processEvents()
         export_step(path, dict(self.params))
+        self.status.showMessage(f'Exported: {path}', 5000)
+
+    def _export_dxf_sections(self):
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        try:
+            import ezdxf  # noqa
+        except ImportError:
+            QMessageBox.warning(self, 'Missing library',
+                                'ezdxf not installed.\n\nRun:  pip install ezdxf')
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, 'Export DXF Sections — choose output folder')
+        if not folder:
+            return
+        export_dxf_sections(folder, dict(self.params))
+        self.status.showMessage(f'Exported DXF sections to: {folder}', 5000)
+
+    def _upload_to_onshape(self):
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        folder = QFileDialog.getExistingDirectory(
+            self, 'Upload DXF Sections to Onshape — choose DXF folder')
+        if not folder:
+            return
+        import subprocess, sys
+        uploader = __import__('os').path.join(
+            __import__('os').path.dirname(__import__('os').path.dirname(__file__)),
+            'onshape_uploader.py')
+        result = subprocess.run(
+            [sys.executable, uploader, folder, '--featurescript-only'],
+            capture_output=True, text=True)
+        if result.returncode == 0:
+            QMessageBox.information(
+                self, 'Onshape Upload',
+                f'FeatureScript generated in folder:\n{folder}\n\n'
+                'To also upload DXFs to Onshape, set environment variables\n'
+                'ONSHAPE_ACCESS_KEY and ONSHAPE_SECRET_KEY,\nthen run:\n\n'
+                f'python onshape_uploader.py "{folder}"')
+        else:
+            QMessageBox.warning(self, 'Onshape Upload Error', result.stderr or result.stdout)
+
+    def _export_dxf_lines_plan(self):
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        try:
+            import ezdxf  # noqa
+        except ImportError:
+            QMessageBox.warning(self, 'Missing library',
+                                'ezdxf not installed.\n\nRun:  pip install ezdxf')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Lines Plan DXF', 'lines_plan.dxf', 'DXF files (*.dxf)')
+        if not path:
+            return
+        export_dxf_lines_plan(path, dict(self.params))
         self.status.showMessage(f'Exported: {path}', 5000)
 
     def _print_config(self):

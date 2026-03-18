@@ -17,11 +17,8 @@ Usage: python parametric_hull.py
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, Button
-import json
 
 # ─────────────────────────────────────────────────────────────
 # PARAMETRIC HULL DEFINITION
@@ -330,8 +327,6 @@ class ParametricHull:
         
         # Add topsides (waterline to deck)
         t_top = np.linspace(0, 1, n_pts // 3)
-        flare = np.radians(p['flare_bow'] * (1 - x_frac) + p['flare_stern'] * x_frac)
-        
         y_top = halfbeam + (deck_y - halfbeam) * t_top
         z_top = 0 + (sheer_z - 0) * t_top
         
@@ -398,7 +393,6 @@ def plot_hull_comprehensive(hull, save_path=None):
     # Colors
     hull_color = '#1e90ff'
     hull_color_port = '#1874cc'
-    water_color = '#0a3d6e'
     grid_color = '#1a2235'
     text_color = '#8899aa'
     accent = '#00d4aa'
@@ -653,6 +647,211 @@ def export_waterlines_csv(hull, filepath, n_waterlines=8, n_pts=120):
     print(f"Exported {n_waterlines} waterlines  -> {filepath}")
 
 
+def export_sections_dxf(hull, folder='dxf_sections', n_stations=11, n_pts=60):
+    """
+    Export each cross-section as an individual DXF file for Onshape sketch import.
+
+    Onshape workflow
+    ----------------
+    For each station DXF:
+      1. In Onshape, create a new Sketch on the plane perpendicular to the
+         hull centreline at that station's X position.
+         (Right-click the Front plane → Offset plane by the X value shown
+          in the filename, e.g. station_05_x1234mm.dxf → offset 1234 mm.)
+      2. Inside the sketch: Insert > DXF/DWG, select the file.
+      3. Align the DXF origin to the sketch origin (DWL centreline).
+      4. Repeat for every station, then use the Loft tool across all sketches.
+
+    The DXF coordinate system
+    -------------------------
+      X (DXF) = Y (hull) = half-breadth, positive starboard
+      Y (DXF) = Z (hull) = vertical,     0 = design waterline, up = positive
+
+    Each file contains one open polyline running port-deck → keel → stbd-deck,
+    plus a dashed DWL reference line and a dot at the centreline keel point.
+    Units: millimetres (Onshape default on DXF import).
+    """
+    import ezdxf
+    import os
+
+    os.makedirs(folder, exist_ok=True)
+    p = hull.params
+    LWL = p['LWL']
+
+    t_vals = np.linspace(0, 1, n_stations)
+    x_positions = LWL * (0.5 - 0.5 * np.cos(np.pi * t_vals))
+    x_positions[0]  = LWL * 0.005
+    x_positions[-1] = LWL * 0.995
+
+    for i, x in enumerate(x_positions):
+        y_stbd, z_stbd = hull.cross_section(x, n_pts)
+
+        # Full section: port-deck → keel → stbd-deck (mm)
+        y_port = -y_stbd[::-1]
+        z_port =  z_stbd[::-1]
+        y_full = np.concatenate([y_port, y_stbd[1:]]) * 1000.0
+        z_full = np.concatenate([z_port, z_stbd[1:]]) * 1000.0
+
+        doc = ezdxf.new('R2010')
+        doc.units = 4          # millimetres
+        msp = doc.modelspace()
+
+        # Section curve — solid line
+        pts = [(float(y), float(z)) for y, z in zip(y_full, z_full)]
+        msp.add_lwpolyline(pts, dxfattribs={'layer': 'SECTION', 'color': 1})
+
+        # DWL reference line — dashed, spanning full beam
+        beam_mm = float(y_stbd[-1]) * 1000.0
+        msp.add_line(
+            (-beam_mm * 1.05, 0.0), (beam_mm * 1.05, 0.0),
+            dxfattribs={'layer': 'DWL', 'color': 5, 'linetype': 'DASHED'},
+        )
+
+        # Centreline
+        msp.add_line(
+            (0.0, float(z_full[len(z_full)//2]) - 5),
+            (0.0, float(z_full[len(z_full)//2]) + 5),
+            dxfattribs={'layer': 'CL', 'color': 3},
+        )
+
+        x_mm = int(round(x * 1000))
+        fname = os.path.join(folder, f'station_{i:02d}_x{x_mm:04d}mm.dxf')
+        doc.saveas(fname)
+
+    print(f"Exported {n_stations} section DXFs -> {folder}/")
+    print("  Filename encodes X offset, e.g. station_05_x1234mm.dxf")
+    print("  -> create an offset sketch plane 1234 mm from the transom.")
+
+
+def export_lines_plan_dxf(hull, filepath='lines_plan.dxf',
+                           n_stations=11, n_waterlines=6, n_pts=80):
+    """
+    Export the complete lines plan as a single DXF — the three classic views
+    arranged side by side as a reference drawing.
+
+    Layout (all in mm, drawn in model space)
+    -----------------------------------------
+      Left panel   : Body plan  (cross-sections, Y vs Z)
+      Centre panel : Profile    (keel & sheer, X vs Z)
+      Right panel  : Half-breadth plan (waterlines, X vs Y from above)
+
+    The three panels are offset horizontally by 'gap' so they don't overlap.
+    This file is for visual reference only, not for direct Onshape import.
+    Use export_sections_dxf() for the per-station files Onshape needs.
+
+    Layers
+    ------
+      SECTION   : cross-section curves (body plan)
+      KEEL      : keel / rocker line
+      SHEER     : sheer line
+      WATERLINE : waterlines (profile buttock crossing + half-breadth)
+      DWL       : design waterline
+      CL        : centreline / base reference
+      GRID      : panel borders and labels
+    """
+    import ezdxf
+
+    p = hull.params
+    LWL  = p['LWL']
+    BWL  = p['BWL']
+    Tc   = p['Tc']
+
+    # Scale to mm
+    S = 1000.0
+    lwl = LWL * S
+    bwl = BWL * S
+    tc  = Tc  * S
+
+    gap = lwl * 0.12   # horizontal gap between panels
+
+    # Panel origins (bottom-left corner reference)
+    # Body plan: centred around Y=0, Z goes from -tc to freeboard
+    body_ox = 0.0
+    # Profile: to the right of body plan
+    prof_ox = bwl + gap
+    # Half-breadth: to the right of profile
+    plan_ox = prof_ox + lwl + gap
+
+    doc = ezdxf.new('R2010')
+    doc.units = 4   # mm
+    msp = doc.modelspace()
+
+    # Station X positions (cosine-spaced)
+    t_vals = np.linspace(0, 1, n_stations)
+    x_pos  = LWL * (0.5 - 0.5 * np.cos(np.pi * t_vals))
+    x_pos[0]  = LWL * 0.005
+    x_pos[-1] = LWL * 0.995
+
+    # ── Body plan ──────────────────────────────────────────────
+    for x in x_pos:
+        y_s, z_s = hull.cross_section(x, n_pts)
+        y_p = -y_s[::-1];  z_p = z_s[::-1]
+        y_f = np.concatenate([y_p, y_s[1:]]) * S
+        z_f = np.concatenate([z_p, z_s[1:]]) * S
+        pts = [(body_ox + float(y), float(z)) for y, z in zip(y_f, z_f)]
+        msp.add_lwpolyline(pts, dxfattribs={'layer': 'SECTION', 'color': 1})
+
+    # DWL and centreline for body plan
+    msp.add_line((body_ox - bwl * 0.55, 0), (body_ox + bwl * 0.55, 0),
+                 dxfattribs={'layer': 'DWL', 'color': 5, 'linetype': 'DASHED'})
+    msp.add_line((body_ox, -tc * 1.1), (body_ox, p['freeboard_bow'] * S * 1.1),
+                 dxfattribs={'layer': 'CL', 'color': 3, 'linetype': 'CENTER'})
+
+    # ── Profile (side view) ─────────────────────────────────────
+    keel  = hull.keel_line(200)
+    sheer = hull.sheer_line(200)
+
+    keel_pts  = [(prof_ox + float(pt[0]) * S, float(pt[1]) * S) for pt in keel]
+    sheer_pts = [(prof_ox + float(pt[0]) * S, float(pt[1]) * S) for pt in sheer]
+
+    msp.add_lwpolyline(keel_pts,  dxfattribs={'layer': 'KEEL',  'color': 2})
+    msp.add_lwpolyline(sheer_pts, dxfattribs={'layer': 'SHEER', 'color': 6})
+
+    # DWL across profile
+    msp.add_line((prof_ox, 0), (prof_ox + lwl, 0),
+                 dxfattribs={'layer': 'DWL', 'color': 5, 'linetype': 'DASHED'})
+
+    # Station tick marks on profile
+    for x in x_pos:
+        kz = float(np.interp(x, keel[:, 0], keel[:, 1])) * S
+        sz = float(np.interp(x, sheer[:, 0], sheer[:, 1])) * S
+        msp.add_line((prof_ox + x * S, kz), (prof_ox + x * S, sz),
+                     dxfattribs={'layer': 'GRID', 'color': 8})
+
+    # ── Half-breadth plan (top view) ────────────────────────────
+    z_levels = np.linspace(-Tc * 0.95, Tc * 0.05, n_waterlines)
+    x_sample = np.linspace(LWL * 0.005, LWL * 0.995, 120)
+
+    for z_lev in z_levels:
+        stbd = []
+        for x in x_sample:
+            y_sec, z_sec = hull.cross_section(x, 60)
+            for k in range(len(z_sec) - 1):
+                if (z_sec[k] - z_lev) * (z_sec[k + 1] - z_lev) <= 0:
+                    frac = (z_lev - z_sec[k]) / (z_sec[k + 1] - z_sec[k] + 1e-12)
+                    y_i  = y_sec[k] + frac * (y_sec[k + 1] - y_sec[k])
+                    stbd.append((x, y_i))
+                    break
+        if not stbd:
+            continue
+        # Starboard side
+        pts_s = [(plan_ox + x * S,  y * S) for x, y in stbd]
+        # Port side (mirror, drawn symmetrically below centreline)
+        pts_p = [(plan_ox + x * S, -y * S) for x, y in reversed(stbd)]
+        color = 4 if abs(z_lev) < 0.001 else 1
+        layer = 'DWL' if abs(z_lev) < 0.001 else 'WATERLINE'
+        msp.add_lwpolyline(pts_s, dxfattribs={'layer': layer, 'color': color})
+        msp.add_lwpolyline(pts_p, dxfattribs={'layer': layer, 'color': color})
+
+    # Centreline across half-breadth plan
+    msp.add_line((plan_ox, -bwl * 0.55 * S), (plan_ox, bwl * 0.55 * S),
+                 dxfattribs={'layer': 'CL', 'color': 3, 'linetype': 'CENTER'})
+
+    doc.saveas(filepath)
+    print(f"Exported lines plan DXF -> {filepath}")
+    print("  Layers: SECTION  KEEL  SHEER  WATERLINE  DWL  CL  GRID")
+
+
 def print_hydrostatics(hull):
     """Compute and print basic hydrostatic properties."""
     p = hull.params
@@ -675,7 +874,6 @@ def print_hydrostatics(hull):
         for k in range(len(z_sec) - 1):
             if z_sec[k] <= 0 and z_sec[k+1] <= 0:
                 # Both below waterline — full trapezoid
-                dy = abs(y_sec[k+1] - y_sec[k])
                 dz = abs(z_sec[k+1] - z_sec[k])
                 area += 0.5 * (abs(y_sec[k]) + abs(y_sec[k+1])) * dz
                 wp_y = max(wp_y, y_sec[k], y_sec[k+1])
@@ -740,16 +938,22 @@ if __name__ == '__main__':
     print_hydrostatics(hull)
 
     # ── CAD export ──────────────────────────────────────────────
-    # hull_stations.csv  — cross-section curves for surface lofting
-    # hull_waterlines.csv — waterplane curves for surface checking
     export_stations_csv(hull, 'hull_stations.csv', n_stations=21, n_pts=40)
     export_waterlines_csv(hull, 'hull_waterlines.csv', n_waterlines=8, n_pts=120)
 
-    print("\n  Rhino workflow:")
-    print("  1. Import hull_stations.csv  -> group rows by 'station' column")
-    print("  2. Curve Through Points on each station group")
-    print("  3. Loft all station curves (or use NetworkSrf with waterlines too)")
-    print("  4. Import hull_waterlines.csv the same way for a cross-check network")
+    # DXF exports — for direct Onshape sketch import
+    export_sections_dxf(hull, folder='dxf_sections', n_stations=11, n_pts=60)
+    export_lines_plan_dxf(hull, filepath='lines_plan.dxf',
+                          n_stations=11, n_waterlines=6, n_pts=80)
+
+    print("\n  --- Onshape workflow (DXF route) ---")
+    print("  1. Open lines_plan.dxf in any viewer to see the full lines plan.")
+    print("  2. For each file in dxf_sections/:")
+    print("       station_05_x1234mm.dxf  ->  X offset = 1234 mm from transom")
+    print("       a. Sketch > offset the Right plane by that X value")
+    print("       b. Inside the sketch: Insert > DXF/DWG, pick the file")
+    print("       c. Confirm origin = DWL / centreline intersection")
+    print("  3. Repeat for all stations, then Loft through all sketches.")
 
     # Generate comprehensive visualization
     fig = plot_hull_comprehensive(hull, save_path='hull_design.png')
