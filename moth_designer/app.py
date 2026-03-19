@@ -11,6 +11,8 @@ Requirements: PyQt5, pyqtgraph, numpy, scipy
 """
 
 import sys
+import json
+from pathlib import Path
 import numpy as np
 
 try:
@@ -36,6 +38,33 @@ from .geometry import (
     displaced_volume, find_disp_waterline, build_3d_mesh,
 )
 from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
+
+# ─────────────────────────────────────────────────────────────
+# Persistent config file  (saved next to the package)
+# ─────────────────────────────────────────────────────────────
+_CONFIG_FILE = Path(__file__).parent.parent / 'hull_design.json'
+
+
+def load_config():
+    """Load params from hull_design.json; fall back to DEFAULTS if missing."""
+    if _CONFIG_FILE.exists():
+        try:
+            data = json.loads(_CONFIG_FILE.read_text(encoding='utf-8'))
+            # Merge with DEFAULTS so new keys added later still get values
+            merged = {k: float(v) for k, v in DEFAULTS.items()}
+            merged.update({k: float(v) for k, v in data.items() if k in merged})
+            return merged
+        except Exception:
+            pass
+    return {k: float(v) for k, v in DEFAULTS.items()}
+
+
+def save_config(params):
+    """Write current params to hull_design.json."""
+    _CONFIG_FILE.write_text(
+        json.dumps({k: round(float(v), 4) for k, v in params.items()}, indent=2),
+        encoding='utf-8',
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -233,7 +262,7 @@ class Hull3DView(QMainWindow):
                                         drawEdges=False, glOptions='opaque')
         self.glw.addItem(self._hull_item)
 
-        ctrl_x, beam_hb, keel_d, _, _, _, _, _, _ = build_ctrl(params)
+        ctrl_x, beam_hb, keel_d, _, _, _, _, _, _, _ = build_ctrl(params)
         dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d)
         self._wl_item = None
         if dz < 0:
@@ -269,9 +298,9 @@ class MothDesigner(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.params       = {k: float(v) for k, v in DEFAULTS.items()}
+        self.params       = load_config()
         self.inputs       = {}
-        self._3d_win        = None
+        self._3d_wi         = None
         self._ref_img_item  = None
         self._plan_img_item = None
         self._theme_name   = 'dark'
@@ -397,7 +426,8 @@ class MothDesigner(QMainWindow):
         dk_hdr_r.addWidget(QLabel(''), stretch=1)
         for text, color in [('Deck width', '#4499ff'),
                              ('Deck height', '#00ffaa'),
-                             ('Keel width',  '#ff6b6b')]:
+                             ('Keel width',  '#ff6b6b'),
+                             ('HB offset',   '#ffaa33')]:
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setFixedWidth(80)
@@ -416,9 +446,10 @@ class MothDesigner(QMainWindow):
             pt_lbl.setFixedWidth(32)
             row.addWidget(pt_lbl, stretch=1)
             for suffix, color, vmin, vmax in [
-                ('_dw', '#4499ff', 0,   500),
-                ('_dz', '#00ffaa', 0,   500),
-                ('_kw', '#ff6b6b', 0,   200),
+                ('_dw', '#4499ff', 0,    500),
+                ('_dz', '#00ffaa', 0,    500),
+                ('_kw', '#ff6b6b', 0,    200),
+                ('_hz', '#ffaa33', -200, 200),
             ]:
                 key  = f'p{i}{suffix}'
                 edit = make_field(DEFAULTS[key], color, theme=t)
@@ -522,7 +553,7 @@ class MothDesigner(QMainWindow):
             return btn
 
         outer.addWidget(make_btn('Launch 3D View',                    True,  self._open_3d_view))
-        outer.addWidget(make_btn('Print Config to Terminal',           False, self._print_config))
+        outer.addWidget(make_btn('Save Config',                        True,  self._save_config))
         outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',    False, self._export_txt))
         outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',     False, self._export_stl))
         outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',    False, self._export_step))
@@ -814,17 +845,20 @@ class MothDesigner(QMainWindow):
         return update
 
     def _reset(self):
+        loaded = load_config()
         for key in self.params:
-            self.params[key] = float(DEFAULTS[key])
-            self.inputs[key].setText(f'{DEFAULTS[key]:.0f}')
+            self.params[key] = loaded[key]
+            self.inputs[key].setText(f'{loaded[key]:.0f}')
+        src = 'saved config' if _CONFIG_FILE.exists() else 'built-in defaults'
+        self.status.showMessage(f'Reset to {src}', 3000)
         self._redraw()
 
     def _open_3d_view(self):
-        if self._3d_win is None:
-            self._3d_win = Hull3DView(parent=self)
-        self._3d_win.refresh(dict(self.params))
-        self._3d_win.show()
-        self._3d_win.raise_()
+        if self._3d_wi is None:
+            self._3d_wi = Hull3DView(parent=self)
+        self._3d_wi.refresh(dict(self.params))
+        self._3d_wi.show()
+        self._3d_wi.raise_()
 
     def _export_txt(self):
         from PyQt5.QtWidgets import QFileDialog
@@ -914,11 +948,16 @@ class MothDesigner(QMainWindow):
         export_dxf_lines_plan(path, dict(self.params))
         self.status.showMessage(f'Exported: {path}', 5000)
 
+    def _save_config(self):
+        save_config(self.params)
+        self.status.showMessage(f'Config saved -> {_CONFIG_FILE}', 4000)
+
     def _print_config(self):
         p = self.params
         dw = [int(p[f'p{i}_dw']) for i in range(1, 6)]
         dz = [int(p[f'p{i}_dz']) for i in range(1, 6)]
         kw = [int(p[f'p{i}_kw']) for i in range(1, 6)]
+        hz = [int(p.get(f'p{i}_hz', 0)) for i in range(1, 6)]
         lines = [
             '',
             '# ================================================================',
@@ -952,6 +991,7 @@ class MothDesigner(QMainWindow):
         lines.append(f'    DEFAULTS[f\'p{{_i}}_dw\'] = {dw}[_i-1]')
         lines.append(f'    DEFAULTS[f\'p{{_i}}_dz\'] = {dz}[_i-1]')
         lines.append(f'    DEFAULTS[f\'p{{_i}}_kw\'] = {kw}[_i-1]')
+        lines.append(f'    DEFAULTS[f\'p{{_i}}_hz\'] = {hz}[_i-1]')
         lines.append('# ================================================================')
         lines.append('')
         print('\n'.join(lines))
@@ -963,7 +1003,7 @@ class MothDesigner(QMainWindow):
         t_hb    = p['transom_half_beam']
         t_draft = p['transom_draft']
         b_draft = p['bow_draft']
-        ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, order, sx, shb = build_ctrl(p)
+        ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, order, sx, shb = build_ctrl(p)
 
         x = np.linspace(0, LWL, 500)
         beam_arr  = beam_eval(x, ctrl_x, beam_hb)
@@ -1003,12 +1043,14 @@ class MothDesigner(QMainWindow):
         dhb_s       = lagrange(x_s, ctrl_x, deck_hb_c, clip_min=0.0)
         sheer_s_arr = lagrange(x_s, ctrl_x, sheer_z_c, clip_min=0.0)
         keelw_s     = lagrange(x_s, ctrl_x, keel_w_c,  clip_min=0.0)
+        hbz_s       = lagrange(x_s, ctrl_x, hb_z_c)
         z_levels    = np.linspace(-MAX_DEPTH * 0.9, -MAX_DEPTH * 0.1, N_WL)
         for ji, zl in enumerate(z_levels):
             px, py = [], []
             for si, xi in enumerate(x_s):
                 ys, zs = cross_section(hb_s[si], depth_s[si], dhb_s[si],
-                                       sheer_s_arr[si], keelw_s[si], 50)
+                                       sheer_s_arr[si], keelw_s[si], 50,
+                                       hb_z=hbz_s[si])
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1029,7 +1071,8 @@ class MothDesigner(QMainWindow):
             px, py = [], []
             for si, xi in enumerate(x_s):
                 ys, zs = cross_section(hb_s[si], depth_s[si], dhb_s[si],
-                                       sheer_s_arr[si], keelw_s[si], 50)
+                                       sheer_s_arr[si], keelw_s[si], 50,
+                                       hb_z=hbz_s[si])
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1051,10 +1094,12 @@ class MothDesigner(QMainWindow):
         sec_dhb   = lagrange(sec_xs, ctrl_x, deck_hb_c, clip_min=0.0)
         sec_dz    = lagrange(sec_xs, ctrl_x, sheer_z_c, clip_min=0.0)
         sec_kw    = lagrange(sec_xs, ctrl_x, keel_w_c,  clip_min=0.0)
+        sec_hz    = lagrange(sec_xs, ctrl_x, hb_z_c)
         mid_x = float(LWL) / 2.0
         for i in range(len(sec_xs)):
             ys, zs = cross_section_spline(sec_hb[i], sec_depth[i],
-                                          sec_dhb[i], sec_dz[i], sec_kw[i], 80)
+                                          sec_dhb[i], sec_dz[i], sec_kw[i], 80,
+                                          hb_z=sec_hz[i])
             if sec_xs[i] <= mid_x:
                 self._b_sections[i].setData(ys, zs)    # forward → starboard (right)
             else:

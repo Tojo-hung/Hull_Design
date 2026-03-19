@@ -19,7 +19,7 @@ def export_txt(filepath, params, n_stations=20, n_t=32):
     Each station is a closed loop of X Y Z points separated by a blank line.
     In SolidWorks: Insert > Curve > Curve Through XYZ Points.
     """
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
     t_draft = params['transom_draft']
 
     x_orig = float(LWL)
@@ -34,8 +34,9 @@ def export_txt(filepath, params, n_stations=20, n_t=32):
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb, clip_min=0.0)[0])
         dz_   = float(lagrange([xi], ctrl_x, sheer_z, clip_min=0.0)[0])
-        kw    = float(lagrange([xi], ctrl_x, keel_w,  clip_min=0.0)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz_, kw, n_t)
+        kw    = float(lagrange([xi], ctrl_x, keel_w,     clip_min=0.0)[0])
+        hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
+        ys, zs = cross_section(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
 
         x_sw = x_orig - xi
         for y, z in zip(ys, zs):
@@ -79,7 +80,7 @@ def export_step(filepath, params, n_stations=40, n_t=24):
     """
     import cadquery as cq
 
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
 
     xs = np.linspace(5.0, float(LWL), n_stations)
 
@@ -91,9 +92,10 @@ def export_step(filepath, params, n_stations=40, n_t=24):
                                    clip_max=float(MAX_DEPTH))[0]), 1.0)
         dhb   = max(float(lagrange([xi], ctrl_x, deck_hb, clip_min=0.0)[0]), 1.0)
         dz_   = max(float(lagrange([xi], ctrl_x, sheer_z, clip_min=0.0)[0]), 1.0)
-        kw    = float(lagrange([xi], ctrl_x, keel_w,  clip_min=0.0)[0])
+        kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
+        hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
 
-        ys_half, zs_half = cross_section(hb, depth, dhb, dz_, kw, n_t)
+        ys_half, zs_half = cross_section(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
         ys_port = -ys_half[::-1]
         zs_port =  zs_half[::-1]
         y_all = np.concatenate([ys_half, ys_port[1:-1]])
@@ -108,7 +110,7 @@ def export_step(filepath, params, n_stations=40, n_t=24):
     cq.exporters.export(solid, filepath)
 
 
-def export_dxf_sections(filepath_or_folder, params, n_pts=20,
+def export_dxf_sections(filepath_or_folder, params, n_pts=3,
                         single_file=False):
     """
     Export cross-section curves as DXF for Onshape sketch import.
@@ -143,21 +145,22 @@ def export_dxf_sections(filepath_or_folder, params, n_pts=20,
     import ezdxf
     import os
 
-    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = build_ctrl(params)
 
     xs = np.array(sorted(set(
         [0.0] + [float(params[f'p{i}_x']) for i in range(1, 6)] + [float(LWL)]
     )))
 
     def _section_curve(xi):
-        """Return full (port→keel→stbd) section as list of (y, z) tuples."""
+        """Return full (port->keel->stbd) section as list of (y, z) tuples."""
         hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
         dz    = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts)
+        hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
+        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
         # port side: mirror + reverse
         y_port = (-ys)[::-1];  z_port = zs[::-1]
         y_full = np.concatenate([y_port, ys[1:]])
@@ -228,7 +231,7 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     """
     import ezdxf
 
-    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = build_ctrl(params)
 
     lwl = float(LWL)
     gap = lwl * 0.12
@@ -257,7 +260,8 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
         dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
         dz    = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts)
+        hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
+        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
         y_p = (-ys)[::-1];  z_p = zs[::-1]
         y_f = np.concatenate([y_p, ys[1:]])
         z_f = np.concatenate([z_p, zs[1:]])
@@ -311,7 +315,8 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
             dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
             dz_   = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
             kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
-            ys, zs = cross_section(hb, depth, dhb, dz_, kw, 50)
+            hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
+            ys, zs = cross_section(hb, depth, dhb, dz_, kw, 50, hb_z=hz)
             for k in range(len(zs) - 1):
                 if (zs[k] - z_lev) * (zs[k + 1] - z_lev) <= 0:
                     f = (z_lev - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)

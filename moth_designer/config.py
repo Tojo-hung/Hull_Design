@@ -32,20 +32,21 @@ N_SEC = len(SECTION_COLORS)
 #   - Deck height > 250 mm at midship
 #
 _PT = [
-    (  335,   90,   80),   # Pt 1
-    ( 1100,  200,  140),   # Pt 2
-    ( 1700,  260,  160),   # Pt 3
-    ( 2300,  280,  150),   # Pt 4
-    ( 2850,  285,  110),   # Pt 5
+    (  335,   80,  110),   # Pt 1
+    ( 1100,  200,  155),   # Pt 2
+    ( 1700,  250,  175),   # Pt 3
+    ( 2300,  280,  160),   # Pt 4
+    ( 2850,  285,  120),   # Pt 5
 ]
-DEFAULTS = dict(transom_half_beam=330.0, transom_draft=75.0,
+DEFAULTS = dict(transom_half_beam=270.0, transom_draft=75.0,
                 transom_sheer=150.0, transom_keel_w=100.0,
                 bow_draft=70.0, bow_sheer=150.0)
 for _i, (_px, _pb, _pd) in enumerate(_PT, 1):
     DEFAULTS[f'p{_i}_x']  = float(_px)
     DEFAULTS[f'p{_i}_hb'] = float(_pb)
     DEFAULTS[f'p{_i}_d']  = float(_pd)
-    DEFAULTS[f'p{_i}_dw'] = [70, 210, 280, 310, 300][_i-1]
+    DEFAULTS[f'p{_i}_dw'] = [90, 210, 255, 280, 290][_i-1]
     DEFAULTS[f'p{_i}_dz'] = [150, 150, 150, 150, 150][_i-1]
-    DEFAULTS[f'p{_i}_kw'] = [1, 50, 40, 50, 175][_i-1]
+    DEFAULTS[f'p{_i}_kw'] = [1, 100, 110, 140, 175][_i-1]
+    DEFAULTS[f'p{_i}_hz'] = [0, 0, 0, 0, 0][_i-1]
 # ================================================================

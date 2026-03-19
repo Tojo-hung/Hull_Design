@@ -25,20 +25,23 @@ def lagrange(x_eval, ctrl_x, ctrl_y, clip_min=None, clip_max=None):
     return result
 
 
-def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40):
-    """Quarter-ellipse bilge (with optional flat keel) + straight topsides to deck edge."""
+def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40, hb_z=0.0):
+    """Quarter-ellipse bilge (with optional flat keel) + straight topsides to deck edge.
+    hb_z: z-height of the max-beam point (0 = design waterline, negative = submerged)."""
     hb     = max(float(hb),    0.0)
     depth  = max(float(depth), 0.0)
     keel_w = min(max(float(keel_w), 0.0), hb)
+    hb_z   = float(hb_z)
     if deck_hb is None: deck_hb = hb
     if deck_z  is None: deck_z  = float(FREEBOARD)
     deck_hb = max(float(deck_hb), 0.0)
-    deck_z  = max(float(deck_z),  0.0)
+    deck_z  = max(float(deck_z),  hb_z)
 
     ell_hb = max(hb - keel_w, 0.001)
     t      = np.linspace(0, np.pi / 2, n)
     y_bilge = keel_w + ell_hb * np.sin(t)
-    z_bilge = -depth * np.cos(t)
+    # z goes from -depth (keel) to hb_z (max beam point)
+    z_bilge = hb_z + (-depth - hb_z) * np.cos(t)
 
     if keel_w > 0:
         n_keel = max(n // 8, 3)
@@ -48,17 +51,18 @@ def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40):
         y_sub, z_sub = y_bilge, z_bilge
 
     n_top = max(n // 5, 3)
-    y_top = np.linspace(hb,     deck_hb, n_top)
-    z_top = np.linspace(0.0,    deck_z,  n_top)
+    y_top = np.linspace(hb,  deck_hb, n_top)
+    z_top = np.linspace(hb_z, deck_z,  n_top)
     return (np.concatenate([y_sub, y_top[1:]]),
             np.concatenate([z_sub, z_top[1:]]))
 
 
-def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80):
+def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80, hb_z=0.0):
     """
     Parametric cubic spline cross-section through the three structural points:
-      keel (0, -depth)  →  half-beam (hb, 0)  →  deck edge (deck_hb, deck_z)
+      keel (0, -depth)  ->  half-beam (hb, hb_z)  ->  deck edge (deck_hb, deck_z)
 
+    hb_z: z-height of the max-beam point (0 = design waterline, negative = submerged).
     A flat keel of width keel_w is prepended when keel_w > 0.
     Enforces a vertical tangent at the keel centreline (dy/dt = 0 at t=0)
     so the curve meets the symmetry plane smoothly.
@@ -68,10 +72,11 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80)
     hb     = max(float(hb),    0.0)
     depth  = max(float(depth), 0.0)
     keel_w = min(max(float(keel_w), 0.0), hb)
+    hb_z   = float(hb_z)
     if deck_hb is None: deck_hb = hb
     if deck_z  is None: deck_z  = float(FREEBOARD)
     deck_hb = max(float(deck_hb), 0.0)
-    deck_z  = max(float(deck_z),  0.0)
+    deck_z  = max(float(deck_z),  hb_z)
 
     # Degenerate (bow/zero-beam) — return a vertical centreline stroke
     if hb < 0.5:
@@ -80,10 +85,10 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80)
     # Structural knot points
     if keel_w > 0:
         key_y = np.array([0.0, keel_w, hb, deck_hb])
-        key_z = np.array([-depth, -depth, 0.0, deck_z])
+        key_z = np.array([-depth, -depth, hb_z, deck_z])
     else:
         key_y = np.array([0.0, hb, deck_hb])
-        key_z = np.array([-depth, 0.0, deck_z])
+        key_z = np.array([-depth, hb_z, deck_z])
 
     # Chord-length parameterisation
     pts   = np.column_stack([key_y, key_z])
@@ -128,9 +133,11 @@ def build_ctrl(p):
     raw_dw = np.array([p[f'p{i}_dw'] for i in range(1, 6)])
     raw_dz = np.array([p[f'p{i}_dz'] for i in range(1, 6)])
     raw_kw = np.array([p[f'p{i}_kw'] for i in range(1, 6)])
+    raw_hz = np.array([p.get(f'p{i}_hz', 0.0) for i in range(1, 6)])
     order  = np.argsort(raw_x)
     sx  = raw_x[order];  shb = raw_hb[order];  sd  = raw_d[order]
     sdw = raw_dw[order]; sdz = raw_dz[order];  skw = raw_kw[order]
+    shz = raw_hz[order]
 
     ctrl_x  = np.concatenate([[0.0],            sx, [float(LWL)]])
     beam_hb = np.concatenate([[0.0],            shb, [float(t_hb)]])
@@ -138,8 +145,9 @@ def build_ctrl(p):
     deck_hb = np.concatenate([[0.0],            sdw, [float(t_hb)]])
     sheer_z = np.concatenate([[p['bow_sheer']], sdz, [p['transom_sheer']]])
     keel_w  = np.concatenate([[0.0],            skw, [float(p['transom_keel_w'])]])
+    hb_z    = np.concatenate([[0.0],            shz, [0.0]])
 
-    return ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, order, sx, shb
+    return ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, order, sx, shb
 
 
 def beam_eval(x_eval, beam_x, beam_hb):
@@ -250,7 +258,7 @@ def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
 
 def build_3d_mesh(params, N_X=80, N_T=36):
     """Return (verts float32 (V,3), faces int32 (F,3)) for GLMeshItem."""
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
 
     xs    = np.linspace(0.0, float(LWL), N_X)
     t_new = np.linspace(0.0, 1.0, N_T)
@@ -265,7 +273,8 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         dhb   = float(lagrange([xi], ctrl_x, deck_hb,  clip_min=0.0)[0])
         dz    = float(lagrange([xi], ctrl_x, sheer_z,  clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, 40)
+        hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
+        ys, zs = cross_section(hb, depth, dhb, dz, kw, 40, hb_z=hz)
         t_src  = np.linspace(0.0, 1.0, len(ys))
         yr = np.interp(t_new, t_src, ys).astype(np.float32)
         zr = np.interp(t_new, t_src, zs).astype(np.float32)
