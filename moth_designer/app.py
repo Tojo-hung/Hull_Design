@@ -35,7 +35,7 @@ from .config import (
 )
 from .geometry import (
     lagrange, cross_section, cross_section_spline, build_ctrl, beam_eval,
-    displaced_volume, find_disp_waterline, build_3d_mesh,
+    displaced_volume, find_disp_waterline, hydrostatic_coefficients, build_3d_mesh,
 )
 from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
 
@@ -554,6 +554,7 @@ class MothDesigner(QMainWindow):
 
         outer.addWidget(make_btn('Launch 3D View',                    True,  self._open_3d_view))
         outer.addWidget(make_btn('Save Config',                        True,  self._save_config))
+        outer.addWidget(make_btn('Calculate Hull Coefficients',         False, self._calc_cb))
         outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',    False, self._export_txt))
         outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',     False, self._export_stl))
         outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',    False, self._export_step))
@@ -947,6 +948,54 @@ class MothDesigner(QMainWindow):
             return
         export_dxf_lines_plan(path, dict(self.params))
         self.status.showMessage(f'Exported: {path}', 5000)
+
+    def _calc_cb(self):
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
+        p = self.params
+        ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, *_ = build_ctrl(p)
+        h = hydrostatic_coefficients(
+            TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d,
+            deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
+            sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c,
+            hb_z_arr=hb_z_c,
+        )
+        t = THEMES[self._theme_name]
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Hydrostatic Coefficients')
+        dlg.setStyleSheet(f'background:{t["box_bg"]}; color:{t["sec_label"]};')
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.setContentsMargins(20, 16, 20, 16)
+
+        rows = [
+            ('Displacement',        f'{h["V"]:.1f} L'),
+            ('Waterline z',         f'{h["z_wl"]:.1f} mm'),
+            ('Draft (T)',            f'{h["T"]:.1f} mm'),
+            ('Max WL beam (Bwl)',    f'{h["B_wl"]:.1f} mm'),
+            ('Midship area (Am)',    f'{h["A_m"]/1e3:.1f} cm²'),
+            ('Waterplane area (Aw)', f'{h["A_wp"]/1e6:.4f} m²'),
+            ('─────────────────────', '─────────'),
+            ('Block coeff.   Cb',    f'{h["Cb"]:.4f}'),
+            ('Prismatic coeff. Cp',  f'{h["Cp"]:.4f}'),
+            ('Midship coeff.  Cm',   f'{h["Cm"]:.4f}'),
+            ('Waterplane coeff. Cw', f'{h["Cw"]:.4f}'),
+        ]
+        for label, value in rows:
+            row_w = QLabel(f'{label:<28}{value}')
+            row_w.setStyleSheet(
+                f'font-family: monospace; font-size: 12px;'
+                f'color: {t["sec_label"]}; background: transparent; border: none;'
+            )
+            lay.addWidget(row_w)
+
+        ok = QPushButton('Close')
+        ok.setStyleSheet(
+            f'background:{t["btn_primary_bg"]};color:{t["btn_primary_fg"]};'
+            f'border:1px solid {t["btn_primary_bd"]};border-radius:4px;padding:6px 20px;'
+        )
+        ok.clicked.connect(dlg.accept)
+        lay.addWidget(ok)
+        dlg.exec_()
 
     def _save_config(self):
         save_config(self.params)

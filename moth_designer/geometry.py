@@ -254,6 +254,81 @@ def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
     return (lo + hi) / 2.0
 
 
+# ─── Hydrostatic coefficients ─────────────────────────────────
+
+def hydrostatic_coefficients(target_l, beam_x, beam_hb, keel_x, keel_d,
+                             deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
+                             keel_w_arr=None, hb_z_arr=None, n_x=120):
+    """Compute standard hull form coefficients at the waterline for target_l litres.
+
+    Returns a dict:
+      Cb   – Block coefficient       = V / (Lwl * Bwl * T)
+      Cp   – Prismatic coefficient   = V / (Am * Lwl)
+      Cm   – Midship coefficient     = Am / (Bm * Tm)
+      Cw   – Waterplane coefficient  = Aw / (Lwl * Bwl)
+      z_wl – waterline z (mm)
+      T    – max draft to waterline (mm)
+      B_wl – max waterline beam (mm)
+      A_m  – midship section area (mm²)
+      A_wp – waterplane area (mm²)
+      L_wl – LWL (mm)
+      V    – displacement (litres)
+    """
+    deck_kw = dict(deck_x=deck_x, deck_hb_arr=deck_hb_arr,
+                   sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr)
+
+    z_wl = find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d, **deck_kw)
+
+    x_arr  = np.linspace(0.0, float(LWL), n_x)
+    depths = lagrange(x_arr, keel_x, keel_d, clip_min=0.0, clip_max=float(MAX_DEPTH))
+    hbs    = beam_eval(x_arr, beam_x, beam_hb)
+    dhbs   = lagrange(x_arr, deck_x, deck_hb_arr,  clip_min=0.0) if deck_x  is not None else hbs.copy()
+    sheers = lagrange(x_arr, deck_x, sheer_z_arr,  clip_min=0.0) if deck_x  is not None else np.full(n_x, float(FREEBOARD))
+    kws    = lagrange(x_arr, deck_x, keel_w_arr,   clip_min=0.0) if deck_x  is not None else np.zeros(n_x)
+    hzs    = lagrange(x_arr, deck_x, hb_z_arr)                    if hb_z_arr is not None else np.zeros(n_x)
+
+    # Waterline half-beam and section area at each station
+    wl_hb   = np.zeros(n_x)
+    sec_area = np.zeros(n_x)
+    for k in range(n_x):
+        ys, zs = cross_section(hbs[k], depths[k], dhbs[k], sheers[k], kws[k], 60, hb_z=hzs[k])
+        sec_area[k] = 2.0 * _section_area_half_below(ys, zs, z_wl)
+        for j in range(len(zs) - 1):
+            if (zs[j] - z_wl) * (zs[j + 1] - z_wl) <= 0:
+                f = (z_wl - zs[j]) / (zs[j + 1] - zs[j] + 1e-12)
+                wl_hb[k] = float(ys[j] + f * (ys[j + 1] - ys[j]))
+                break
+
+    T    = z_wl + float(np.max(depths))
+    B_wl = 2.0 * float(np.max(wl_hb))
+
+    # Waterplane area: integrate waterline half-beam along length
+    A_wp = float(np.trapezoid(2.0 * wl_hb, x_arr))
+
+    # Midship section: station closest to LWL/2
+    mid_idx = int(n_x // 2)
+    A_m  = float(sec_area[mid_idx])
+    Bm   = 2.0 * float(wl_hb[mid_idx])
+    Tm   = z_wl + float(depths[mid_idx])
+
+    V_mm3 = target_l * 1e6
+    Lwl   = float(LWL)
+
+    Cb = V_mm3 / (Lwl * B_wl * T)        if (B_wl > 0 and T > 0)       else float('nan')
+    Cp = V_mm3 / (A_m  * Lwl)            if A_m > 0                     else float('nan')
+    Cm = A_m   / (Bm   * Tm)             if (Bm > 0 and Tm > 0)         else float('nan')
+    Cw = A_wp  / (Lwl  * B_wl)           if (Lwl > 0 and B_wl > 0)      else float('nan')
+
+    return dict(Cb=Cb, Cp=Cp, Cm=Cm, Cw=Cw,
+                z_wl=z_wl, T=T, B_wl=B_wl, A_m=A_m, A_wp=A_wp,
+                L_wl=Lwl, V=target_l)
+
+
+# Keep old name as alias for backwards compatibility
+def block_coefficient(*args, **kwargs):
+    return hydrostatic_coefficients(*args, **kwargs)
+
+
 # ─── 3-D mesh ─────────────────────────────────────────────────
 
 def build_3d_mesh(params, N_X=80, N_T=36):
