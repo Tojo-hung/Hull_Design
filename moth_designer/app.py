@@ -300,6 +300,7 @@ class MothDesigner(QMainWindow):
         super().__init__()
         self.params       = load_config()
         self.inputs       = {}
+        self._input_bounds = {}   # key -> (vmin, vmax)
         self._3d_wi         = None
         self._ref_img_item  = None
         self._plan_img_item = None
@@ -834,6 +835,7 @@ class MothDesigner(QMainWindow):
     # ── Callbacks ─────────────────────────────────────────────
 
     def _make_updater(self, key, vmin, vmax):
+        self._input_bounds[key] = (vmin, vmax)
         def update():
             try:
                 val = float(self.inputs[key].text())
@@ -998,6 +1000,13 @@ class MothDesigner(QMainWindow):
         dlg.exec_()
 
     def _save_config(self):
+        # Flush every input field into self.params before saving
+        for key, (vmin, vmax) in self._input_bounds.items():
+            try:
+                val = float(self.inputs[key].text())
+                self.params[key] = max(vmin, min(vmax, val))
+            except (ValueError, KeyError):
+                pass
         save_config(self.params)
         self.status.showMessage(f'Config saved -> {_CONFIG_FILE}', 4000)
 
