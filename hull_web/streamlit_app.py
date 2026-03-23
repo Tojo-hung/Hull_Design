@@ -47,9 +47,16 @@ if uploaded_cfg is not None:
     file_hash = hashlib.md5(raw).hexdigest()
     if file_hash != st.session_state['cfg_hash']:
         loaded = json.loads(raw)
+        _KEY_MAP = {
+            'transom_half_beam': 't_hb',
+            'transom_draft':     't_dft',
+            'transom_sheer':     't_shr',
+            'transom_keel_w':    't_kw',
+        }
         for k, v in loaded.items():
             try:
-                st.session_state[k] = float(v)
+                sk = _KEY_MAP.get(k, k)
+                st.session_state[sk] = float(v)
             except (TypeError, ValueError):
                 pass
         st.session_state['cfg_hash']        = file_hash

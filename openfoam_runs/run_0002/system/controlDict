@@ -1,0 +1,69 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application     simpleFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         500;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   500;
+purgeWrite      1;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+
+functions
+{
+    forces
+    {
+        type            forces;
+        libs            (forces);
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+
+        patches         (hull);
+        rho             rhoInf;
+        rhoInf          1025;        // sea water kg/m^3
+        CofR            (1.677 0 0); // hull midpoint (LWL/2 in metres)
+    }
+
+    residuals
+    {
+        type            solverInfo;
+        libs            (utilityFunctionObjects);
+        writeControl    timeStep;
+        writeInterval   1;
+        fields          (U p k omega);
+    }
+
+    hullPressure
+    {
+        type            surfaces;
+        libs            (sampling);
+        writeControl    onEnd;       // write once at end of run
+
+        surfaceFormat   vtk;         // open in ParaView
+        fields          (p U);       // pressure + velocity on hull
+
+        surfaces
+        {
+            hull
+            {
+                type        patch;
+                patches     (hull);
+                interpolate true;
+            }
+        }
+    }
+}

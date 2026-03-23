@@ -555,6 +555,7 @@ class MothDesigner(QMainWindow):
 
         outer.addWidget(make_btn('Launch 3D View',                    True,  self._open_3d_view))
         outer.addWidget(make_btn('Save Config',                        True,  self._save_config))
+        outer.addWidget(make_btn('Load Config',                        True,  self._load_config_file))
         outer.addWidget(make_btn('Calculate Hull Coefficients',         False, self._calc_cb))
         outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',    False, self._export_txt))
         outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',     False, self._export_stl))
@@ -998,6 +999,23 @@ class MothDesigner(QMainWindow):
         ok.clicked.connect(dlg.accept)
         lay.addWidget(ok)
         dlg.exec_()
+
+    def _load_config_file(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Load Config', '', 'JSON files (*.json)')
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding='utf-8'))
+            for key in self.params:
+                if key in data:
+                    self.params[key] = float(data[key])
+                    self.inputs[key].setText(f'{self.params[key]:.0f}')
+            self._redraw()
+            self.status.showMessage(f'Loaded: {path}', 4000)
+        except Exception as e:
+            self.status.showMessage(f'Error loading config: {e}', 5000)
 
     def _save_config(self):
         # Flush every input field into self.params before saving

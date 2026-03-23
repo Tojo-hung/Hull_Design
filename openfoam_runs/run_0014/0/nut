@@ -1,0 +1,22 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+
+// nut = k/omega = 0.00135/3.2 = 4.2e-4 m^2/s
+dimensions      [0 2 -1 0 0 0 0];
+internalField   uniform 4.2e-4;
+
+boundaryField
+{
+    inlet        { type calculated; value uniform 4.2e-4; }
+    outlet       { type calculated; value uniform 4.2e-4; }
+    hull         { type nutkWallFunction; value uniform 4.2e-4; }
+    front        { type nutkWallFunction; value uniform 4.2e-4; }
+    back         { type nutkWallFunction; value uniform 4.2e-4; }
+    bottom       { type nutkWallFunction; value uniform 4.2e-4; }
+    top          { type symmetryPlane; }
+}

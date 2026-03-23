@@ -1,0 +1,24 @@
+#!/bin/bash
+# Allrun — interFoam hull resistance simulation
+# Usage: bash Allrun  (from inside the case directory)
+
+set -e
+
+OF_BASHRC="/usr/lib/openfoam/openfoam2406/etc/bashrc"
+
+run() {
+    echo "=== $1 ==="
+    bash --norc --noprofile -c "source $OF_BASHRC 2>/dev/null; cd $(pwd); $1"
+}
+
+run "surfaceFeatureExtract"
+run "blockMesh"
+run "snappyHexMesh -overwrite"
+run "setFields"
+run "decomposePar -force"
+bash --norc --noprofile -c "source $OF_BASHRC 2>/dev/null; cd $(pwd); mpirun -np 4 interFoam -parallel | tee log.interFoam"
+bash --norc --noprofile -c "source $OF_BASHRC 2>/dev/null; cd $(pwd); reconstructPar -latestTime"
+
+echo "=== Done ==="
+echo "Forces: postProcessing/forces/0/force.dat"
+echo "Surface: postProcessing/hullPressure/*/hull.vtp"

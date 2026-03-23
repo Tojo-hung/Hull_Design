@@ -1,0 +1,22 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+
+// k = 1.5*(U*I)^2,  I=0.01 (1% turbulence), U=3 m/s -> k=0.00135
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0.00135;
+
+boundaryField
+{
+    inlet        { type fixedValue; value uniform 0.00135; }
+    outlet       { type zeroGradient; }
+    hull         { type kqRWallFunction; value uniform 0.00135; }
+    front        { type kqRWallFunction; value uniform 0.00135; }
+    back         { type kqRWallFunction; value uniform 0.00135; }
+    bottom       { type kqRWallFunction; value uniform 0.00135; }
+    top          { type symmetryPlane; }
+}

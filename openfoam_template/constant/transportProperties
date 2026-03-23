@@ -1,0 +1,26 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      transportProperties;
+}
+
+// Two-phase properties for interFoam
+phases (water air);
+
+water
+{
+    transportModel  Newtonian;
+    nu              1.004e-6;   // kinematic viscosity (m^2/s) at 20 C
+    rho             1025;       // sea water density (kg/m^3)
+}
+
+air
+{
+    transportModel  Newtonian;
+    nu              1.48e-5;
+    rho             1.2;
+}
+
+sigma           0.07;           // surface tension (N/m)

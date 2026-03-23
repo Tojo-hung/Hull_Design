@@ -1,0 +1,34 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      alpha.water;
+}
+
+// Initialised by setFields: 1=water (z<0), 0=air (z>0)
+dimensions      [0 0 0 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type    codedFixedValue;
+        value   uniform 0;
+        name    alphaWaterInlet;
+        code
+        #{
+            const vectorField& Cf = patch().Cf();
+            scalarField alpha(Cf.size(), 0.0);
+            forAll(Cf, i) { alpha[i] = (Cf[i].z() < 0.0) ? 1.0 : 0.0; }
+            operator==(alpha);
+        #};
+    }
+    outlet       { type inletOutlet;  inletValue uniform 0; value uniform 0; }
+    hull         { type zeroGradient; }
+    front        { type zeroGradient; }
+    back         { type zeroGradient; }
+    bottom       { type zeroGradient; }
+    atmosphere   { type inletOutlet;  inletValue uniform 0; value uniform 0; }
+}

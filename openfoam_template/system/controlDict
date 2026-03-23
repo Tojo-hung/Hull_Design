@@ -1,0 +1,70 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application     interFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         8;              // 8 s ~ 7 hull lengths — enough for quasi-steady drag
+deltaT          0.005;
+adjustTimeStep  yes;
+maxCo           0.5;
+maxAlphaCo      0.5;
+
+writeControl    adjustableRunTime;
+writeInterval   15;             // write only at end
+purgeWrite      1;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+
+functions
+{
+    forces
+    {
+        type            forces;
+        libs            (forces);
+        writeControl    timeStep;
+        writeInterval   1;
+        log             yes;
+        patches         (hull);
+        rho             rhoInf;
+        rhoInf          1025;
+        CofR            (1.677 0 0);
+    }
+
+    hullPressure
+    {
+        type            surfaces;
+        libs            (sampling);
+        writeControl    onEnd;
+        surfaceFormat   vtk;
+        fields          (p_rgh U alpha.water);
+        surfaces
+        {
+            hull
+            {
+                type        patch;
+                patches     (hull);
+                interpolate true;
+            }
+        }
+    }
+
+    residuals
+    {
+        type            solverInfo;
+        libs            (utilityFunctionObjects);
+        writeControl    adjustableRunTime;
+        writeInterval   0.5;
+        fields          (U p_rgh k omega alpha.water);
+    }
+}
