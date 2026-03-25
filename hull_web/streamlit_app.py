@@ -84,10 +84,18 @@ lwl = st.sidebar.number_input(
     step=10.0, key='lwl',
     help='Moth class rule maximum is 3355 mm')
 
+st.sidebar.header('Displacement')
+target_disp = st.sidebar.number_input(
+    'Target displacement (L)',
+    min_value=10.0, max_value=500.0,
+    value=float(st.session_state.get('target_disp', TARGET_DISP_L)),
+    step=1.0, key='target_disp',
+    help='Target all-up weight in litres (1 L ≈ 1 kg)')
+
 import geometry as _geom
 _geom.LWL = lwl
 
-st.caption(f'LWL = {lwl:.0f} mm  |  Target displacement = {TARGET_DISP_L} L')
+st.caption(f'LWL = {lwl:.0f} mm  |  Target displacement = {target_disp:.0f} L')
 st.sidebar.divider()
 st.sidebar.caption('Adjust control points in the table above the plots.')
 
@@ -161,7 +169,7 @@ deck_kw  = dict(deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
                 sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c, hb_z_arr=hb_z_c)
 total_vol = displaced_volume(float(np.max(sheer_z_c)), ctrl_x, beam_hb,
                               ctrl_x, keel_d, **deck_kw)
-dz_wl    = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
+dz_wl    = find_disp_waterline(target_disp, ctrl_x, beam_hb,
                                 ctrl_x, keel_d, **deck_kw)
 
 # ─── Metrics row ──────────────────────────────────────────────
@@ -169,7 +177,7 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric('Max beam',        f'{2*float(np.max(beam_arr)):.0f} mm')
 m2.metric('Max depth',       f'{float(np.max(-keel_z)):.0f} mm')
 m3.metric('Total hull vol',  f'{total_vol:.1f} L')
-m4.metric(f'{TARGET_DISP_L} L waterline z', f'{dz_wl:.1f} mm')
+m4.metric(f'{target_disp:.0f} L waterline z', f'{dz_wl:.1f} mm')
 
 # ─── Plots ────────────────────────────────────────────────────
 BG   = '#0d1525'
@@ -432,7 +440,7 @@ st.divider()
 if st.button('Calculate Hull Form Coefficients', type='primary'):
     with st.spinner('Calculating...'):
         h = hydrostatic_coefficients(
-            TARGET_DISP_L,
+            target_disp,
             ctrl_x, beam_hb, ctrl_x, keel_d,
             deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
             sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c, hb_z_arr=hb_z_c,
