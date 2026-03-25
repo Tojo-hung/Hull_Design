@@ -30,7 +30,6 @@ st.set_page_config(
 )
 
 st.title('⛵ Moth Hull Designer')
-st.caption(f'Moth class rule  —  LWL = {LWL} mm  |  Target displacement = {TARGET_DISP_L} L')
 
 # ─── Config upload (processed before widgets so session_state is set first) ──
 if 'cfg_hash' not in st.session_state:
@@ -77,13 +76,26 @@ t_shr = st.sidebar.number_input('Sheer (mm)',      0.0,  400.0, float(DEFAULTS['
 t_kw  = st.sidebar.number_input('Keel width (mm)', 0.0,  300.0, float(DEFAULTS['transom_keel_w']), 1.0, key='t_kw')
 
 st.sidebar.divider()
+st.sidebar.header('Hull Length')
+lwl = st.sidebar.number_input(
+    'LWL — waterline length (mm)',
+    min_value=500.0, max_value=6000.0,
+    value=float(st.session_state.get('lwl', LWL)),
+    step=10.0, key='lwl',
+    help='Moth class rule maximum is 3355 mm')
+
+import geometry as _geom
+_geom.LWL = lwl
+
+st.caption(f'LWL = {lwl:.0f} mm  |  Target displacement = {TARGET_DISP_L} L')
+st.sidebar.divider()
 st.sidebar.caption('Adjust control points in the table above the plots.')
 
 # ─── Control-point table ──────────────────────────────────────
 st.subheader('Control Points')
 
 col_cfg = {
-    'X (mm)':          st.column_config.NumberColumn('X (mm)',          min_value=10,           max_value=LWL-10,       step=1),
+    'X (mm)':          st.column_config.NumberColumn('X (mm)',          min_value=10,           max_value=int(lwl)-10,  step=1),
     'Half-beam (mm)':  st.column_config.NumberColumn('Half-beam (mm)',  min_value=0,            max_value=500,          step=1),
     'Draft (mm)':      st.column_config.NumberColumn('Draft (mm)',      min_value=0,            max_value=MAX_DEPTH,    step=1),
     'Deck HB (mm)':    st.column_config.NumberColumn('Deck HB (mm)',    min_value=0,            max_value=500,          step=1),
@@ -140,7 +152,7 @@ for i, row in enumerate(edited_df.itertuples(), 1):
 # ─── Geometry ─────────────────────────────────────────────────
 ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = build_ctrl(params)
 
-x_dense  = np.linspace(0.0, float(LWL), 300)
+x_dense  = np.linspace(0.0, float(lwl), 300)
 keel_z   = -lagrange(x_dense, ctrl_x, keel_d, clip_min=0.0, clip_max=float(MAX_DEPTH))
 sheer_z  = lagrange(x_dense, ctrl_x, sheer_z_c, clip_min=0.0)
 beam_arr = beam_eval(x_dense, ctrl_x, beam_hb)
@@ -190,7 +202,7 @@ fig.add_hline(y=0,     line=dict(color='#4488cc', width=1, dash='dash'), row=1, 
 fig.add_hline(y=dz_wl, line=dict(color='#ffd700', width=1.5, dash='dot'), row=1, col=1)
 # Transom line
 fig.add_trace(go.Scatter(
-    x=[float(LWL), float(LWL)], y=[-float(t_dft), float(t_shr)],
+    x=[float(lwl), float(lwl)], y=[-float(t_dft), float(t_shr)],
     line=dict(color='#ffaa33', width=2.5), name='Transom', showlegend=False,
 ), row=1, col=1)
 # Bow stem: vertical line at x=0 from bow_draft (keel) to bow_sheer
