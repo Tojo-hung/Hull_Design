@@ -45,23 +45,61 @@ from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval, lagran
 # Leave a param out to keep it fixed at the saved/default value.
 # ══════════════════════════════════════════════════════════════
 SEARCH_SPACE = {
-    'p3_hb':  (140, 230),   # midship half-beam    (current 180)
-    'p3_d':   (120, 200),   # midship draft        (current 160)
-    'p3_kw':  (40,  130),   # midship keel width   (current 80)
-    'p2_hb':  (100, 210),   # forward half-beam    (current 150)
-    'p2_d':   (110, 200),   # forward draft        (current 155)
-    'p4_hb':  (150, 250),   # aft half-beam        (current 195)
-    'p4_d':   (120, 200),   # aft draft            (current 160)
-    'p3_x':   (1500, 2000), # midship position     (current 1700)
+    # Midship
+    'p3_hb':  (160, 220),   # midship half-beam (mm)
+    'p3_d':   (130, 195),   # midship draft
+    'p3_kw':  (80,  150),   # midship keel width
+    'p3_x':   (1800, 2100), # midship position
+
+    # Forward section
+    'p2_hb':  (150, 230),   # forward half-beam
+    'p2_d':   (140, 210),   # forward draft
+    'p2_kw':  (20,  100),   # forward keel width
+    'p2_x':   (700, 1300),  # forward section position
+
+    # Aft section
+    'p4_hb':  (165, 240),   # aft half-beam
+    'p4_d':   (130, 200),   # aft draft
+    'p4_kw':  (60,  160),   # aft keel width
+    'p4_x':   (2150, 2600), # aft position
+
+    # Bow section
+    'p1_hb':  (60,  140),   # bow half-beam
+    'p1_d':   (70,  150),   # bow draft
+    'p1_kw':  (0,   30),    # bow keel width
+    'p1_x':   (200, 500),   # bow section position
+
+    # Stern section
+    'p5_hb':  (150, 230),   # stern half-beam
+    'p5_d':   (90,  170),   # stern draft
+    'p5_kw':  (40,  150),   # stern keel width
+    'p5_x':   (2700, 3100), # stern section position
+
+    # Transom
+    'transom_half_beam': (100, 250), # transom width
+    'transom_draft':     (40,  130), # transom depth
+
+    # Bow entry
+    'bow_draft': (30, 120),          # bow entry draft
+
+    # Beam height (z of max beam point — controls V vs U section shape)
+    'p1_hz':  (0,  100),  # bow section beam height
+    'p2_hz':  (0,  150),  # forward beam height
+    'p3_hz':  (0,  80),   # midship beam height
+    'p4_hz':  (0,  100),  # aft beam height
+    'p5_hz':  (0,  80),   # stern beam height
 }
 # ══════════════════════════════════════════════════════════════
 
 
 def load_base_params():
-    if CONFIG_FILE.exists():
-        data   = json.loads(CONFIG_FILE.read_text())
+    # Prefer best_hull.json (optimizer output) over hull_design.json
+    src = BEST_FILE if BEST_FILE.exists() else CONFIG_FILE
+    if src.exists():
+        data   = json.loads(src.read_text())
         merged = {k: float(v) for k, v in DEFAULTS.items()}
         merged.update({k: float(v) for k, v in data.items() if k in merged})
+        print(f'Base params loaded from: {src.name}')
         return merged
     return {k: float(v) for k, v in DEFAULTS.items()}
 
@@ -102,13 +140,16 @@ def build_stl_bytes(params, N_X=80, N_T=32):
     return buf.getvalue()
 
 
-def setup_case(run_dir, stl_bytes, speed_ms):
-    """Copy template → run_dir, write hull STL, patch inlet speed."""
+def setup_case(run_dir, stl_bytes, speed_ms, fidelity='high'):
+    """Copy template → run_dir, write hull STL, patch inlet speed and mesh fidelity.
+
+    fidelity='low'       → coarse mesh (level 1 1), 2 BL layers, endTime 5   (~1-2 min)
+    fidelity='high'      → finer mesh  (level 1 2), 3 BL layers, endTime 8   (~5-8 min)
+    fidelity='very_high' → finest mesh (level 2 3), 5 BL layers, endTime 12  (~20-40 min)
+    """
     if run_dir.exists():
         shutil.rmtree(run_dir, ignore_errors=True)
 
-    # Use copy (not copy2) to avoid permission errors on Windows NTFS via WSL
-    errors = []
     shutil.copytree(TEMPLATE_DIR, run_dir,
                     copy_function=shutil.copy,
                     ignore_dangling_symlinks=True)
@@ -126,6 +167,34 @@ def setup_case(run_dir, stl_bytes, speed_ms):
         txt,
     )
     u_file.write_text(txt)
+
+    if fidelity == 'low':
+        # Coarse mesh: faster but less accurate — for broad exploration
+        snappy = run_dir / 'system' / 'snappyHexMeshDict'
+        txt = snappy.read_text()
+        txt = re.sub(r'level\s*\(\s*\d+\s+\d+\s*\)', 'level (1 1)', txt)
+        txt = re.sub(r'nSurfaceLayers\s+\d+', 'nSurfaceLayers 2', txt)
+        snappy.write_text(txt)
+
+        ctrl = run_dir / 'system' / 'controlDict'
+        txt = ctrl.read_text()
+        txt = re.sub(r'endTime\s+[\d.]+\s*;', 'endTime 5;', txt)
+        txt = re.sub(r'writeInterval\s+[\d.]+\s*;', 'writeInterval 5;', txt)
+        ctrl.write_text(txt)
+
+    elif fidelity == 'very_high':
+        # Finest mesh: high-accuracy single evaluation
+        snappy = run_dir / 'system' / 'snappyHexMeshDict'
+        txt = snappy.read_text()
+        txt = re.sub(r'level\s*\(\s*\d+\s+\d+\s*\)', 'level (2 3)', txt)
+        txt = re.sub(r'nSurfaceLayers\s+\d+', 'nSurfaceLayers 5', txt)
+        snappy.write_text(txt)
+
+        ctrl = run_dir / 'system' / 'controlDict'
+        txt = ctrl.read_text()
+        txt = re.sub(r'endTime\s+[\d.]+\s*;', 'endTime 12;', txt)
+        txt = re.sub(r'writeInterval\s+[\d.]+\s*;', 'writeInterval 12;', txt)
+        ctrl.write_text(txt)
 
 
 N_CORES = 16   # set to your CPU core count (check with: nproc)
@@ -194,20 +263,20 @@ def extract_drag(run_dir):
 # ── Objective ──────────────────────────────────────────────────
 _n = [0]
 
-def objective(x, param_names, base_params, speed_ms, log_rows):
+def objective(x, param_names, base_params, speed_ms, log_rows, fidelity='high'):
     _n[0] += 1
     n      = _n[0]
     params = {**base_params, **dict(zip(param_names, map(float, x)))}
-    run_dir = WORK_DIR / f'run_{n:04d}'
+    run_dir = WORK_DIR / f'run_{n:04d}_{fidelity}'
 
-    print(f'\n{"="*55}  Eval {n}  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
+    print(f'\n{"="*55}  Eval {n} [{fidelity}]  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
     for k, v in zip(param_names, x):
         print(f'  {k:12s} = {v:.1f}')
 
     drag, status = 1e6, 'error'
     try:
         stl  = build_stl_bytes(params)
-        setup_case(run_dir, stl, speed_ms)
+        setup_case(run_dir, stl, speed_ms, fidelity=fidelity)
         run_case(run_dir)
         drag   = extract_drag(run_dir)
         status = 'ok'
@@ -217,7 +286,7 @@ def objective(x, param_names, base_params, speed_ms, log_rows):
         status = str(e)
 
     row = {'n': n, 'drag_N': round(drag, 4),
-           'status': status, 'speed_ms': speed_ms}
+           'status': status, 'speed_ms': speed_ms, 'fidelity': fidelity}
     row.update(dict(zip(param_names, [round(float(v), 2) for v in x])))
     log_rows.append(row)
     pd.DataFrame(log_rows).to_csv(LOG_FILE, index=False)
@@ -227,62 +296,160 @@ def objective(x, param_names, base_params, speed_ms, log_rows):
 # ── Main ───────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--speed',   type=float, default=3.601,
+    ap.add_argument('--speed',    type=float, default=3.601,
                     help='Boat speed m/s (default 3.601 ≈ 7.0 knots)')
-    ap.add_argument('--n-calls', type=int,   default=30,
-                    help='Total evaluations (default 30)')
-    ap.add_argument('--n-init',  type=int,   default=8,
-                    help='Random initial samples (default 8)')
-    ap.add_argument('--resume',  action='store_true',
+    ap.add_argument('--n-low',    type=int,   default=40,
+                    help='Stage 1: coarse-mesh evaluations (default 40)')
+    ap.add_argument('--n-high',   type=int,   default=20,
+                    help='Stage 2: fine-mesh evaluations (default 20)')
+    ap.add_argument('--top-k',    type=int,   default=5,
+                    help='Top-K coarse candidates to seed fine-mesh stage (default 5)')
+    ap.add_argument('--n-init',   type=int,   default=16,
+                    help='CMA-ES population size (default 16)')
+    ap.add_argument('--sigma0',   type=float, default=0.25,
+                    help='CMA-ES initial step size as fraction of range (default 0.25)')
+    ap.add_argument('--resume',   action='store_true',
                     help='Resume from existing optimization_log.csv')
+    ap.add_argument('--stage',    type=int,   default=0,
+                    help='Start at stage 1 or 2 directly (default 0 = run both)')
+    ap.add_argument('--eval-best', action='store_true',
+                    help='Run a single fine-mesh evaluation on best_hull.json and exit')
     args = ap.parse_args()
 
+    # ── Single fine-mesh eval of best_hull.json ─────────────────
+    if args.eval_best:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        base  = load_base_params()
+        names = list(SEARCH_SPACE.keys())
+        x     = [base.get(n, SEARCH_SPACE[n][0]) for n in names]
+        log_rows = []
+        if LOG_FILE.exists():
+            log_rows = pd.read_csv(LOG_FILE).to_dict('records')
+            _n[0]    = int(pd.read_csv(LOG_FILE)['n'].max())
+        drag = objective(x, names, base, args.speed, log_rows, fidelity='very_high')
+        print(f'\nVery-fine-mesh drag for best config: {drag:.3f} N')
+        return
+
     try:
-        from skopt import gp_minimize
-        from skopt.space import Real
+        import cma
     except ImportError:
-        sys.exit('pip install scikit-optimize')
+        sys.exit('pip install cma')
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-    base      = load_base_params()
-    names     = list(SEARCH_SPACE.keys())
-    space     = [Real(lo, hi, name=n) for n, (lo, hi) in SEARCH_SPACE.items()]
-    log_rows  = []
-    x0 = y0  = None
+    base   = load_base_params()
+    names  = list(SEARCH_SPACE.keys())
+    lows   = np.array([SEARCH_SPACE[n][0] for n in names], dtype=float)
+    highs  = np.array([SEARCH_SPACE[n][1] for n in names], dtype=float)
+    ranges = highs - lows
+
+    log_rows = []
+    best_x   = None
+    best_f   = 1e6
 
     if args.resume and LOG_FILE.exists():
         prev = pd.read_csv(LOG_FILE)
         ok   = prev[prev['status'] == 'ok']
         if not ok.empty:
-            x0       = ok[names].values.tolist()
-            y0       = ok['drag_N'].tolist()
             log_rows = prev.to_dict('records')
             _n[0]    = int(prev['n'].max())
-            print(f'Resuming from {len(ok)} previous runs.')
+            best_row = ok.loc[ok['drag_N'].idxmin()]
+            best_f   = float(best_row['drag_N'])
+            best_x   = best_row[names].values.astype(float).tolist()
+            print(f'Resuming from {len(ok)} previous runs. Best so far: {best_f:.3f} N')
 
-    print(f'\nOptimising {len(names)} parameters  |  {args.n_calls} total evals')
-    print(f'Target speed: {args.speed:.2f} m/s  ({args.speed*1.944:.1f} knots)')
-    print(f'Params: {names}\n')
+    def denorm(x_norm):
+        return np.clip(lows + np.array(x_norm) * ranges, lows, highs)
 
-    res = gp_minimize(
-        func=lambda x: objective(x, names, base, args.speed, log_rows),
-        dimensions=space,
-        n_calls=args.n_calls,
-        n_initial_points=args.n_init,
-        x0=x0, y0=y0,
-        acq_func='EI',
-        noise=1e-3,
-        random_state=42,
-    )
+    def run_cma(fidelity, n_evals, x0_norm, sigma0, label):
+        """Run CMA-ES at given fidelity. Returns (best_x, best_f, all results)."""
+        print(f'\n{"="*55}')
+        print(f'STAGE: {label}  |  fidelity={fidelity}  |  budget={n_evals} evals')
+        print(f'Params: {names}\n')
 
-    best = {**base, **dict(zip(names, map(float, res.x)))}
+        nonlocal log_rows
+        stage_best_x, stage_best_f = x0_norm, 1e6
+
+        def obj(x_norm):
+            nonlocal stage_best_x, stage_best_f
+            x = denorm(x_norm)
+            f = objective(x, names, base, args.speed, log_rows, fidelity=fidelity)
+            if f < stage_best_f:
+                stage_best_f = f
+                stage_best_x = list(x_norm)
+            return f
+
+        opts = cma.CMAOptions()
+        opts['bounds']    = [[0.0] * len(names), [1.0] * len(names)]
+        opts['maxfevals'] = n_evals
+        opts['popsize']   = args.n_init
+        opts['tolx']      = 1e-4
+        opts['tolfun']    = 0.5
+        opts['verbose']   = -9
+        opts['seed']      = 42
+
+        es = cma.CMAEvolutionStrategy(x0_norm, sigma0, opts)
+        while not es.stop():
+            solutions = es.ask()
+            fitnesses = [obj(x) for x in solutions]
+            es.tell(solutions, fitnesses)
+            print(f'  Gen best: {min(fitnesses):.3f} N  |  Stage best: {stage_best_f:.3f} N')
+
+        return stage_best_x, stage_best_f
+
+    # ── Stage 1: coarse mesh — broad exploration ────────────────
+    if args.stage in (0, 1):
+        # Start from hull_design.json values (clipped to search bounds)
+        base_x = np.clip([base.get(n, (lows[i]+highs[i])/2)
+                          for i, n in enumerate(names)], lows, highs)
+        x0 = ((base_x - lows) / ranges).tolist() if best_x is None else \
+             ((np.array(best_x) - lows) / ranges).tolist()
+
+        s1_best_norm, s1_best_f = run_cma(
+            fidelity='low',
+            n_evals=args.n_low,
+            x0_norm=x0,
+            sigma0=args.sigma0,
+            label='Stage 1 — coarse mesh',
+        )
+
+        # Pick top-K from coarse log to seed fine-mesh stage
+        df = pd.read_csv(LOG_FILE)
+        ok_low = df[(df['status'] == 'ok') & (df['fidelity'] == 'low')]
+        top_k  = ok_low.nsmallest(args.top_k, 'drag_N')
+        print(f'\nTop {args.top_k} coarse candidates (drag N):')
+        print(top_k[['drag_N'] + names].to_string(index=False))
+
+        # Best coarse candidate becomes the fine-mesh starting point
+        best_coarse_row = top_k.iloc[0]
+        s1_best_norm = ((best_coarse_row[names].values.astype(float) - lows) / ranges).tolist()
+        print(f'\nBest coarse drag: {s1_best_f:.3f} N  →  seeding fine-mesh stage')
+
+    # ── Stage 2: fine mesh — refine around best ─────────────────
+    if args.stage in (0, 2):
+        if args.stage == 2:
+            # Jump straight to stage 2: start from best_hull.json
+            s1_best_norm = ((np.array(best_x or [0.5]*len(names)) - lows) / ranges).tolist()
+
+        s2_best_norm, s2_best_f = run_cma(
+            fidelity='high',
+            n_evals=args.n_high,
+            x0_norm=s1_best_norm,
+            sigma0=0.1,        # tighter search around best coarse point
+            label='Stage 2 — fine mesh',
+        )
+
+        best_x = denorm(s2_best_norm).tolist()
+        best_f = s2_best_f
+
+    # ── Save best ───────────────────────────────────────────────
+    best = {**base, **dict(zip(names, map(float, best_x)))}
     BEST_FILE.write_text(json.dumps(
         {k: round(float(v), 4) for k, v in best.items()}, indent=2))
 
     print(f'\n{"="*55}')
-    print(f'Best drag: {res.fun:.3f} N')
-    for k, v in zip(names, res.x):
+    print(f'Best drag: {best_f:.3f} N')
+    for k, v in zip(names, best_x):
         print(f'  {k:12s} = {v:.1f}')
     print(f'\nBest config -> {BEST_FILE}')
     print(f'Full log    -> {LOG_FILE}')

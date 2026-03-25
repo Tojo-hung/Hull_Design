@@ -37,7 +37,7 @@ castellatedMeshControls
     {
         hull
         {
-            level (1 1);   // coarser for fast optimization; use (2 3) for final runs
+            level (1 2);   // coarser for fast optimization; use (2 3) for final runs
             patchInfo { type wall; }
         }
     }
@@ -84,7 +84,7 @@ addLayersControls
 
     layers
     {
-        hull { nSurfaceLayers 2; }
+        hull { nSurfaceLayers 3; }
     }
 }
 

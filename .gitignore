@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+hull-env/
+
+# CFD results — large files, not tracked
+cfd_results/
+openfoam_runs/
+
+# Generated images and logs
+optimization_plots.png
+section_all_stations.png
+section_control_points_detail.png
+optimization_log_run1.csv
+
+# OS
+.DS_Store
+Thumbs.db

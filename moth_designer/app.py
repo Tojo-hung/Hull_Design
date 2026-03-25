@@ -560,8 +560,7 @@ class MothDesigner(QMainWindow):
         outer.addWidget(make_btn('Export XYZ Points  (SolidWorks)',    False, self._export_txt))
         outer.addWidget(make_btn('Export STL  (SolidWorks / CAD)',     False, self._export_stl))
         outer.addWidget(make_btn('Export STEP  (SolidWorks solid)',    False, self._export_step))
-        outer.addWidget(make_btn('Export DXF Sections  (Onshape)',     True,  self._export_dxf_sections))
-        outer.addWidget(make_btn('Upload DXF -> Onshape',              True,  self._upload_to_onshape))
+        outer.addWidget(make_btn('Export DXF Sections',                 True,  self._export_dxf_sections))
         outer.addWidget(make_btn('Export Lines Plan DXF  (reference)', False, self._export_dxf_lines_plan))
         outer.addWidget(make_btn('Reset to Defaults',                  False, self._reset))
         outer.addWidget(make_btn('Measure Distance',                   False, self._toggle_measure))
@@ -913,29 +912,6 @@ class MothDesigner(QMainWindow):
             return
         export_dxf_sections(folder, dict(self.params))
         self.status.showMessage(f'Exported DXF sections to: {folder}', 5000)
-
-    def _upload_to_onshape(self):
-        from PyQt5.QtWidgets import QFileDialog, QMessageBox
-        folder = QFileDialog.getExistingDirectory(
-            self, 'Upload DXF Sections to Onshape — choose DXF folder')
-        if not folder:
-            return
-        import subprocess, sys
-        uploader = __import__('os').path.join(
-            __import__('os').path.dirname(__import__('os').path.dirname(__file__)),
-            'onshape_uploader.py')
-        result = subprocess.run(
-            [sys.executable, uploader, folder, '--featurescript-only'],
-            capture_output=True, text=True)
-        if result.returncode == 0:
-            QMessageBox.information(
-                self, 'Onshape Upload',
-                f'FeatureScript generated in folder:\n{folder}\n\n'
-                'To also upload DXFs to Onshape, set environment variables\n'
-                'ONSHAPE_ACCESS_KEY and ONSHAPE_SECRET_KEY,\nthen run:\n\n'
-                f'python onshape_uploader.py "{folder}"')
-        else:
-            QMessageBox.warning(self, 'Onshape Upload Error', result.stderr or result.stdout)
 
     def _export_dxf_lines_plan(self):
         from PyQt5.QtWidgets import QFileDialog, QMessageBox
