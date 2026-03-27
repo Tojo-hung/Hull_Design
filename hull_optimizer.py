@@ -69,11 +69,7 @@ SEARCH_SPACE = {
     'p1_kw':  (0,   30),    # bow keel width
     'p1_x':   (200, 500),   # bow section position
 
-    # Stern section
-    'p5_hb':  (150, 230),   # stern half-beam
-    'p5_d':   (90,  170),   # stern draft
-    'p5_kw':  (40,  150),   # stern keel width
-    'p5_x':   (2700, 3100), # stern section position
+    # Stern section removed — P5 dropped to reduce parameter count
 
     # Transom
     'transom_half_beam': (100, 250), # transom width
@@ -87,7 +83,6 @@ SEARCH_SPACE = {
     'p2_hz':  (0,  150),  # forward beam height
     'p3_hz':  (0,  80),   # midship beam height
     'p4_hz':  (0,  100),  # aft beam height
-    'p5_hz':  (0,  80),   # stern beam height
 }
 # ══════════════════════════════════════════════════════════════
 

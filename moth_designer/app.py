@@ -383,7 +383,7 @@ class MothDesigner(QMainWindow):
             hdr_row.addWidget(lbl)
         cp_layout.addWidget(hdr)
 
-        for i in range(1, 6):
+        for i in range(1, 5):
             row_w = QWidget()
             row_w.setStyleSheet('background: transparent; border: none;')
             row = QHBoxLayout(row_w)
@@ -437,7 +437,7 @@ class MothDesigner(QMainWindow):
             dk_hdr_r.addWidget(lbl)
         dk_layout.addWidget(dk_hdr_w)
 
-        for i in range(1, 6):
+        for i in range(1, 5):
             row_w = QWidget(); row_w.setStyleSheet('background:transparent;border:none;')
             row = QHBoxLayout(row_w)
             row.setContentsMargins(0, 0, 0, 0); row.setSpacing(4)
@@ -657,7 +657,7 @@ class MothDesigner(QMainWindow):
         self._pl_ctrl_p  = pg.ScatterPlotItem(pen=None, brush=br('#ffaa33'), size=9)
         self._pl_labels  = [
             pg.TextItem(f'P{i}', color='#ffaa33', anchor=(0.5, 1.2))
-            for i in range(1, 6)
+            for i in range(1, 5)
         ]
         self._pl_wl_s = [pg.PlotDataItem(pen=mk(WL_COLORS[j], width=1))
                          for j in range(N_WL)]
@@ -673,8 +673,8 @@ class MothDesigner(QMainWindow):
                      + self._pl_aw_s + self._pl_aw_p):
             self.plot_plan.addItem(item)
 
-        # 5 sections at the internal control points (p1–p5); colours spread across palette
-        _n_body = 5
+        # 4 sections at the internal control points (p1–p4); colours spread across palette
+        _n_body = 4
         _body_cols = [SECTION_COLORS[int(i * (len(SECTION_COLORS) - 1) / (_n_body - 1))]
                       for i in range(_n_body)]
         self._b_sections = [pg.PlotDataItem(pen=mk(_body_cols[i], width=1.8))
@@ -796,7 +796,7 @@ class MothDesigner(QMainWindow):
     def _load_plan_ref_image(self):
         self._clear_plan_ref_image()
         # Plan view: X = 0→LWL, Y = -max_hb→+max_hb
-        max_hb = float(max(self.params[f'p{i}_hb'] for i in range(1, 6)))
+        max_hb = float(max(self.params[f'p{i}_hb'] for i in range(1, 5)))
         max_hb = max(max_hb, float(self.params['transom_half_beam'])) * 1.05
         self._plan_img_item = self._load_image_into_plot(
             self.plot_plan,
@@ -1006,10 +1006,10 @@ class MothDesigner(QMainWindow):
 
     def _print_config(self):
         p = self.params
-        dw = [int(p[f'p{i}_dw']) for i in range(1, 6)]
-        dz = [int(p[f'p{i}_dz']) for i in range(1, 6)]
-        kw = [int(p[f'p{i}_kw']) for i in range(1, 6)]
-        hz = [int(p.get(f'p{i}_hz', 0)) for i in range(1, 6)]
+        dw = [int(p[f'p{i}_dw']) for i in range(1, 5)]
+        dz = [int(p[f'p{i}_dz']) for i in range(1, 5)]
+        kw = [int(p[f'p{i}_kw']) for i in range(1, 5)]
+        hz = [int(p.get(f'p{i}_hz', 0)) for i in range(1, 5)]
         lines = [
             '',
             '# ================================================================',
@@ -1018,7 +1018,7 @@ class MothDesigner(QMainWindow):
             '# ================================================================',
             '_PT = [',
         ]
-        for i in range(1, 6):
+        for i in range(1, 5):
             x  = int(p[f'p{i}_x'])
             hb = int(p[f'p{i}_hb'])
             d  = int(p[f'p{i}_d'])

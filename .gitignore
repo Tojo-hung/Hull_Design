@@ -9,11 +9,28 @@ hull-env/
 cfd_results/
 openfoam_runs/
 
-# Generated images and logs
+# Optimizer outputs
+optimization_log*.csv
 optimization_plots.png
-section_all_stations.png
-section_control_points_detail.png
-optimization_log_run1.csv
+best_fine_mesh.json
+best_from_log.json
+
+# Generated visualizations
+section_*.png
+visualize_sections.py
+plot_optimization.py
+
+# Generated exports
+dxf_sections/
+hull_stations.csv
+hull_waterlines.csv
+lines_plan.dxf
+
+# Backup files
+*.bak
+
+# Claude internal
+.claude/
 
 # OS
 .DS_Store

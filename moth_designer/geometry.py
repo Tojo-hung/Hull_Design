@@ -127,13 +127,13 @@ def build_ctrl(p):
     t_hb    = p['transom_half_beam']
     t_draft = p['transom_draft']
     b_draft = p['bow_draft']
-    raw_x  = np.array([p[f'p{i}_x']  for i in range(1, 6)])
-    raw_hb = np.array([p[f'p{i}_hb'] for i in range(1, 6)])
-    raw_d  = np.array([p[f'p{i}_d']  for i in range(1, 6)])
-    raw_dw = np.array([p[f'p{i}_dw'] for i in range(1, 6)])
-    raw_dz = np.array([p[f'p{i}_dz'] for i in range(1, 6)])
-    raw_kw = np.array([p[f'p{i}_kw'] for i in range(1, 6)])
-    raw_hz = np.array([p.get(f'p{i}_hz', 0.0) for i in range(1, 6)])
+    raw_x  = np.array([p[f'p{i}_x']  for i in range(1, 5)])
+    raw_hb = np.array([p[f'p{i}_hb'] for i in range(1, 5)])
+    raw_d  = np.array([p[f'p{i}_d']  for i in range(1, 5)])
+    raw_dw = np.array([p[f'p{i}_dw'] for i in range(1, 5)])
+    raw_dz = np.array([p[f'p{i}_dz'] for i in range(1, 5)])
+    raw_kw = np.array([p[f'p{i}_kw'] for i in range(1, 5)])
+    raw_hz = np.array([p.get(f'p{i}_hz', 0.0) for i in range(1, 5)])
     order  = np.argsort(raw_x)
     sx  = raw_x[order];  shb = raw_hb[order];  sd  = raw_d[order]
     sdw = raw_dw[order]; sdz = raw_dz[order];  skw = raw_kw[order]
