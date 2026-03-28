@@ -11,7 +11,7 @@ import re, shutil, subprocess, sys, time
 from pathlib import Path
 
 RUN_DIR  = Path.home() / 'openfoam_runs' / 'test_mesh'
-OF       = 'source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null'
+OF       = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
 N_CORES  = 8
 END_TIME = 0.5   # seconds — just enough to see solver start and forces stabilise
 

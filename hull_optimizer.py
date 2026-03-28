@@ -20,6 +20,7 @@ Evaluate best_hull.json once:
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -41,7 +42,7 @@ STUDY_DB     = ROOT / 'optuna_study.db'
 STUDY_NAME   = 'moth_hull'
 
 N_CORES = 8   # set to your CPU core count (check with: nproc)
-OF      = 'source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null'
+OF      = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
 
 sys.path.insert(0, str(ROOT))
 from moth_designer.config   import DEFAULTS, LWL, TARGET_DISP_L
@@ -89,6 +90,37 @@ SEARCH_SPACE = {
     'p4_hz':  (0,  100),
 }
 # ══════════════════════════════════════════════════════════════
+
+def find_openfoam_exe(executable_name):
+    # 1. System PATH
+    path = shutil.which(executable_name)
+    if path:
+        return path
+
+    # 2. Active Environment Variables
+    for env_var in ['FOAM_USER_APPBIN', 'FOAM_APPBIN']:
+        env_path = os.environ.get(env_var)
+        if env_path:
+            candidate = Path(env_path) / executable_name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+
+    # 3. Local User Compilations
+    home = Path.home()
+    for candidate in home.glob(f"OpenFOAM/*/platforms/*/bin/{executable_name}"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+
+    # 4. Global System Installations
+    for candidate in Path('/usr/lib/openfoam').glob(f"*/platforms/*/bin/{executable_name}"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+
+    for candidate in Path('/opt').glob(f"openfoam*/platforms/*/bin/{executable_name}"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+
+    raise FileNotFoundError(f"Could not find OpenFOAM executable: {executable_name}")
 
 
 def load_base_params():
@@ -254,8 +286,11 @@ def run_case(run_dir):
     ]
 
     for label, cmd in steps:
+        exe_path = find_openfoam_exe(label)
+        run_cmd = cmd.replace(label, exe_path)
+        lib_dir = Path(exe_path).parent.parent / 'lib'
         t0   = time.time()
-        full = f'{OF}; {cmd} > log.{label} 2>&1'
+        full = f'{OF}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd} > log.{label} 2>&1'
         ret  = subprocess.run(['bash', '--norc', '--noprofile', '-c', full], cwd=run_dir)
         elapsed = time.time() - t0
         status  = 'ok' if ret.returncode == 0 else 'FAILED'

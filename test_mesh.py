@@ -18,7 +18,7 @@ OF           = 'source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null'
 
 sys.path.insert(0, str(ROOT))
 from moth_designer.config   import DEFAULTS
-from hull_optimizer import build_geometry_stl, setup_case
+from hull_optimizer import build_geometry_stl, setup_case, find_openfoam_exe
 
 
 def load_params():
@@ -30,9 +30,14 @@ def load_params():
 
 
 def run_step(label, cmd):
+    exe_path = find_openfoam_exe(cmd.split()[0])
+    run_cmd = cmd.replace(cmd.split()[0], exe_path)
+    from pathlib import Path
+    lib_dir = Path(exe_path).parent.parent / 'lib'
+    of_env = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
     t0  = time.time()
     ret = subprocess.run(
-        ['bash', '--norc', '--noprofile', '-c', f'{OF}; {cmd} > log.{label} 2>&1'],
+        ['bash', '--norc', '--noprofile', '-c', f'{of_env}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd} > log.{label} 2>&1'],
         cwd=RUN_DIR
     )
     elapsed = time.time() - t0
