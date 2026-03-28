@@ -6,5 +6,5 @@ FoamFile
     object      decomposeParDict;
 }
 
-numberOfSubdomains  16;   // set to number of CPU cores you want to use
+numberOfSubdomains  8;    // set to number of CPU cores you want to use
 method              scotch;

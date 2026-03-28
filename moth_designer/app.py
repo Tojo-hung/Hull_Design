@@ -1199,6 +1199,7 @@ class MothDesigner(QMainWindow):
 # ─────────────────────────────────────────────────────────────
 
 def main():
+    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
     app = QApplication(sys.argv)
     app.setApplicationName('Moth Hull Designer')
     apply_dark_theme(app)

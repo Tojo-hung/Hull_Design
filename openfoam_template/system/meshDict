@@ -1,0 +1,89 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      meshDict;
+}
+
+// ─── Geometry ─────────────────────────────────────────────────
+// Single combined STL: hull + domain walls (named solid groups).
+// Written by hull_optimizer.py for each evaluation.
+surfaceFile     "constant/triSurface/geometry.stl";
+
+// ─── Global cell size (metres) ────────────────────────────────
+maxCellSize     0.10;
+
+// ─── Surface refinement ───────────────────────────────────────
+boundaryCellSize                    0.03;
+boundaryCellSizeRefinementThickness 0.10;
+
+localRefinement
+{
+    hull
+    {
+        cellSize    0.012;
+    }
+}
+
+// ─── Volumetric refinement regions ───────────────────────────
+objectRefinements
+{
+    // Near-hull box — covers full canoe body cross-section
+    nearHull
+    {
+        type        box;
+        cellSize    0.02;
+        centre      (1.677  0.0  -0.10);
+        lengthX     4.2;
+        lengthY     0.70;
+        lengthZ     0.55;
+    }
+
+    // Wake refinement behind transom
+    wake
+    {
+        type        box;
+        cellSize    0.04;
+        centre      (4.0  0.0  -0.10);
+        lengthX     3.0;
+        lengthY     0.60;
+        lengthZ     0.40;
+    }
+
+    // Free-surface band either side of z=0
+    freeSurface
+    {
+        type        box;
+        cellSize    0.03;
+        centre      (2.0  0.0  0.0);
+        lengthX     7.0;
+        lengthY     3.2;
+        lengthZ     0.20;
+    }
+}
+
+// ─── Boundary layer on hull ───────────────────────────────────
+boundaryLayers
+{
+    patchBoundaryLayers
+    {
+        hull
+        {
+            nLayers                 3;
+            thicknessRatio          1.3;
+            maxFirstLayerThickness  0.003;
+            allowDiscontinuity      1;
+        }
+    }
+    optimiseLayer   1;
+    untangleLayers  0;
+}
+
+// ─── Mesh quality ─────────────────────────────────────────────
+meshQualitySettings
+{
+    maxNonOrthogonality     70;
+    maxSkewness             4;
+    minTetQuality           -1e30;  // disables tet smoother loop — solver quality governed by maxNonOrthogonality
+}

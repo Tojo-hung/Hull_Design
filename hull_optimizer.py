@@ -1,24 +1,27 @@
 """
-hull_optimizer.py  —  Bayesian hull optimisation via OpenFOAM
-=============================================================
+hull_optimizer.py  —  Optuna TPE hull optimisation via OpenFOAM + cfMesh
+========================================================================
 Run from WSL:
-    cd /mnt/c/Users/xrace/OneDrive/Documents/GitHub/Hull_Design
+    cd ~/Hull_Design
     source ~/hull-env/bin/activate
-    python3 hull_optimizer.py --speed 3.0 --n-calls 30
+    python3 hull_optimizer.py --speed 3.601 --n-trials 150
 
-Each call = one full mesh + simpleFoam run (~5-15 min each).
-Results append to optimization_log.csv after every evaluation.
+Each trial = one full cfMesh + interFoam run.
+Results append to optimization_log.csv after every trial.
 Best hull is saved to best_hull.json (load it in the desktop app
 via Save/Load config or by copying over hull_design.json).
+
+Resume a previous run:
+    python3 hull_optimizer.py --resume
+
+Evaluate best_hull.json once:
+    python3 hull_optimizer.py --eval-best
 """
 
 import argparse
-import io
 import json
-import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import time
@@ -28,21 +31,25 @@ import numpy as np
 import pandas as pd
 
 # ── Paths ──────────────────────────────────────────────────────
-ROOT          = Path(__file__).parent
-TEMPLATE_DIR  = ROOT / 'openfoam_template'
-WORK_DIR      = Path.home() / 'openfoam_runs'   # Linux fs — avoids NTFS permission errors
-LOG_FILE      = ROOT / 'optimization_log.csv'
-BEST_FILE     = ROOT / 'best_hull.json'
-CONFIG_FILE   = ROOT / 'hull_design.json'
+ROOT         = Path(__file__).parent
+TEMPLATE_DIR = ROOT / 'openfoam_template'
+WORK_DIR     = Path.home() / 'openfoam_runs'
+LOG_FILE     = ROOT / 'optimization_log.csv'
+BEST_FILE    = ROOT / 'best_hull.json'
+CONFIG_FILE  = ROOT / 'hull_design.json'
+STUDY_DB     = ROOT / 'optuna_study.db'
+STUDY_NAME   = 'moth_hull'
+
+N_CORES = 8   # set to your CPU core count (check with: nproc)
+OF      = 'source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null'
 
 sys.path.insert(0, str(ROOT))
-from moth_designer.config   import DEFAULTS, LWL, MAX_DEPTH, TARGET_DISP_L
-from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval, lagrange,
+from moth_designer.config   import DEFAULTS, LWL, TARGET_DISP_L
+from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval,
                                     find_disp_waterline)
 
 # ══════════════════════════════════════════════════════════════
 # SEARCH SPACE — edit bounds to suit your study
-# Leave a param out to keep it fixed at the saved/default value.
 # ══════════════════════════════════════════════════════════════
 SEARCH_SPACE = {
     # Midship
@@ -69,26 +76,24 @@ SEARCH_SPACE = {
     'p1_kw':  (0,   30),    # bow keel width
     'p1_x':   (200, 500),   # bow section position
 
-    # Stern section removed — P5 dropped to reduce parameter count
-
     # Transom
-    'transom_half_beam': (100, 250), # transom width
-    'transom_draft':     (40,  130), # transom depth
+    'transom_half_beam': (100, 250),
+    'transom_draft':     (40,  130),
 
     # Bow entry
-    'bow_draft': (30, 120),          # bow entry draft
+    'bow_draft': (30, 120),
 
-    # Beam height (z of max beam point — controls V vs U section shape)
-    'p1_hz':  (0,  100),  # bow section beam height
-    'p2_hz':  (0,  150),  # forward beam height
-    'p3_hz':  (0,  80),   # midship beam height
-    'p4_hz':  (0,  100),  # aft beam height
+    # Beam height (controls V vs U section shape)
+    'p1_hz':  (0,  100),
+    'p2_hz':  (0,  150),
+    'p3_hz':  (0,  80),
+    'p4_hz':  (0,  100),
 }
 # ══════════════════════════════════════════════════════════════
 
 
 def load_base_params():
-    # Prefer best_hull.json (optimizer output) over hull_design.json
+    """Load hull params, preferring best_hull.json over hull_design.json."""
     src = BEST_FILE if BEST_FILE.exists() else CONFIG_FILE
     if src.exists():
         data   = json.loads(src.read_text())
@@ -99,12 +104,47 @@ def load_base_params():
     return {k: float(v) for k, v in DEFAULTS.items()}
 
 
-def build_stl_bytes(params, N_X=80, N_T=32):
-    """Generate binary STL bytes from hull params.
+def check_draft_angle(params, min_angle_deg=1.0):
+    """Check STL normals satisfy a minimum mould draft angle (pull direction = +Z).
 
-    The hull is shifted vertically so the 130 L displacement waterline
-    lands exactly at z=0 in the OpenFOAM domain (= the slip free-surface).
+    A face passes if its normal's Z-component >= sin(min_angle_deg).
+    Returns True if all faces pass, False otherwise.
     """
+    verts, faces = build_3d_mesh(params, N_X=60, N_T=24)  # low-res — just for check
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0).astype(np.float64)
+    nlen = np.linalg.norm(normals, axis=1, keepdims=True)
+    valid = (nlen[:, 0] > 0)
+    normals[valid] /= nlen[valid]
+    min_dot = np.sin(np.radians(min_angle_deg))
+    if np.any(normals[valid, 2] < min_dot):
+        print(f'  Draft angle < {min_angle_deg}° detected — invalid geometry')
+        return False
+    return True
+
+
+def build_geometry_stl(params, N_X=250, N_T=100):
+    """Generate combined ASCII STL (hull + domain box) for cfMesh.
+
+    OpenFOAM 2406 cfMesh requires a single top-level surfaceFile.
+    This function combines all geometry into one ASCII STL with named
+    solid groups — cfMesh uses the solid name as the boundary patch name.
+
+    Solids produced:
+        hull        — hull surface (~100k triangles)
+        inlet       — x = -1.0 m face
+        outlet      — x =  5.0 m face
+        front       — y = -1.5 m face
+        back        — y =  1.5 m face
+        bottom      — z = -0.8 m face
+        atmosphere  — z =  0.5 m face
+
+    The hull is shifted so the 130L waterline lands at z=0.
+    All coordinates in metres.
+    """
+    # ── Hull ──────────────────────────────────────────────────
     ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = \
         build_ctrl(params)
     dz_wl = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
@@ -114,34 +154,72 @@ def build_stl_bytes(params, N_X=80, N_T=32):
     print(f'  130 L waterline: z = {dz_wl:.1f} mm  (shifted to z=0 in domain)')
 
     verts, faces = build_3d_mesh(params, N_X=N_X, N_T=N_T)
-    # Shift hull so the displacement waterline is at z=0
-    verts[:, 2] -= dz_wl   # z column (mm), will be scaled *0.001 by snappy
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    normals = np.cross(v1 - v0, v2 - v0).astype(np.float32)
+    verts[:, 2] -= dz_wl
+    verts *= 0.001                  # mm → metres
+    v0, v1, v2 = verts[faces[:,0]], verts[faces[:,1]], verts[faces[:,2]]
+    normals = np.cross(v1 - v0, v2 - v0)
     nlen = np.linalg.norm(normals, axis=1, keepdims=True)
     nlen[nlen == 0] = 1.0
     normals /= nlen
-    buf = io.BytesIO()
-    buf.write(b'Moth hull optimiser' + b' ' * 61)
-    buf.write(struct.pack('<I', len(faces)))
+
+    lines = ['solid hull\n']
     for i in range(len(faces)):
-        buf.write(normals[i].tobytes())
-        buf.write(verts[faces[i, 0]].tobytes())
-        buf.write(verts[faces[i, 1]].tobytes())
-        buf.write(verts[faces[i, 2]].tobytes())
-        buf.write(b'\x00\x00')
-    return buf.getvalue()
+        n = normals[i]
+        p = [verts[faces[i, j]] for j in range(3)]
+        lines.append(
+            f'  facet normal {n[0]:.6e} {n[1]:.6e} {n[2]:.6e}\n'
+            f'    outer loop\n'
+            f'      vertex {p[0][0]:.6e} {p[0][1]:.6e} {p[0][2]:.6e}\n'
+            f'      vertex {p[1][0]:.6e} {p[1][1]:.6e} {p[1][2]:.6e}\n'
+            f'      vertex {p[2][0]:.6e} {p[2][1]:.6e} {p[2][2]:.6e}\n'
+            f'    endloop\n'
+            f'  endfacet\n'
+        )
+    lines.append('endsolid hull\n')
+
+    # ── Domain bounding box ────────────────────────────────────
+    xn, xx = -1.0,  5.0
+    yn, yx = -1.5,  1.5
+    zn, zx = -0.8,  0.5
+
+    # (name, tri1, tri2) — winding order gives inward-pointing normals
+    box_tris = [
+        ('inlet',
+         [(xn,yn,zn),(xn,yx,zn),(xn,yx,zx)], [(xn,yn,zn),(xn,yx,zx),(xn,yn,zx)]),
+        ('outlet',
+         [(xx,yx,zn),(xx,yn,zn),(xx,yn,zx)], [(xx,yx,zn),(xx,yn,zx),(xx,yx,zx)]),
+        ('front',
+         [(xn,yn,zx),(xx,yn,zx),(xx,yn,zn)], [(xn,yn,zx),(xx,yn,zn),(xn,yn,zn)]),
+        ('back',
+         [(xn,yx,zn),(xx,yx,zn),(xx,yx,zx)], [(xn,yx,zn),(xx,yx,zx),(xn,yx,zx)]),
+        ('bottom',
+         [(xn,yn,zn),(xx,yn,zn),(xx,yx,zn)], [(xn,yn,zn),(xx,yx,zn),(xn,yx,zn)]),
+        ('atmosphere',
+         [(xn,yx,zx),(xx,yx,zx),(xx,yn,zx)], [(xn,yx,zx),(xx,yn,zx),(xn,yn,zx)]),
+    ]
+
+    def fmt_tri(p0, p1, p2):
+        n = np.cross(np.subtract(p1, p0), np.subtract(p2, p0)).astype(float)
+        n /= np.linalg.norm(n)
+        return (f'  facet normal {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n'
+                f'    outer loop\n'
+                f'      vertex {p0[0]} {p0[1]} {p0[2]}\n'
+                f'      vertex {p1[0]} {p1[1]} {p1[2]}\n'
+                f'      vertex {p2[0]} {p2[1]} {p2[2]}\n'
+                f'    endloop\n'
+                f'  endfacet\n')
+
+    for name, t1, t2 in box_tris:
+        lines.append(f'solid {name}\n')
+        lines.append(fmt_tri(*t1))
+        lines.append(fmt_tri(*t2))
+        lines.append(f'endsolid {name}\n')
+
+    return ''.join(lines)
 
 
-def setup_case(run_dir, stl_bytes, speed_ms, fidelity='high'):
-    """Copy template → run_dir, write hull STL, patch inlet speed and mesh fidelity.
-
-    fidelity='low'       → coarse mesh (level 1 1), 2 BL layers, endTime 5   (~1-2 min)
-    fidelity='high'      → finer mesh  (level 1 2), 3 BL layers, endTime 8   (~5-8 min)
-    fidelity='very_high' → finest mesh (level 2 3), 5 BL layers, endTime 12  (~20-40 min)
-    """
+def setup_case(run_dir, geometry_stl, speed_ms):
+    """Copy template → run_dir, write combined geometry STL, patch inlet speed."""
     if run_dir.exists():
         shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -149,9 +227,11 @@ def setup_case(run_dir, stl_bytes, speed_ms, fidelity='high'):
                     copy_function=shutil.copy,
                     ignore_dangling_symlinks=True)
 
-    stl_path = run_dir / 'constant' / 'triSurface' / 'hull.stl'
-    stl_path.parent.mkdir(parents=True, exist_ok=True)
-    stl_path.write_bytes(stl_bytes)
+    tri_dir = run_dir / 'constant' / 'triSurface'
+    tri_dir.mkdir(parents=True, exist_ok=True)
+
+    # Single combined ASCII STL — hull + domain walls (all named solids)
+    (tri_dir / 'geometry.stl').write_text(geometry_stl)
 
     # Patch velocity in 0/U
     u_file = run_dir / '0' / 'U'
@@ -163,71 +243,35 @@ def setup_case(run_dir, stl_bytes, speed_ms, fidelity='high'):
     )
     u_file.write_text(txt)
 
-    if fidelity == 'low':
-        # Coarse mesh: faster but less accurate — for broad exploration
-        snappy = run_dir / 'system' / 'snappyHexMeshDict'
-        txt = snappy.read_text()
-        txt = re.sub(r'level\s*\(\s*\d+\s+\d+\s*\)', 'level (1 1)', txt)
-        txt = re.sub(r'nSurfaceLayers\s+\d+', 'nSurfaceLayers 2', txt)
-        snappy.write_text(txt)
-
-        ctrl = run_dir / 'system' / 'controlDict'
-        txt = ctrl.read_text()
-        txt = re.sub(r'endTime\s+[\d.]+\s*;', 'endTime 5;', txt)
-        txt = re.sub(r'writeInterval\s+[\d.]+\s*;', 'writeInterval 5;', txt)
-        ctrl.write_text(txt)
-
-    elif fidelity == 'very_high':
-        # Finest mesh: high-accuracy single evaluation
-        snappy = run_dir / 'system' / 'snappyHexMeshDict'
-        txt = snappy.read_text()
-        txt = re.sub(r'level\s*\(\s*\d+\s+\d+\s*\)', 'level (2 3)', txt)
-        txt = re.sub(r'nSurfaceLayers\s+\d+', 'nSurfaceLayers 5', txt)
-        snappy.write_text(txt)
-
-        ctrl = run_dir / 'system' / 'controlDict'
-        txt = ctrl.read_text()
-        txt = re.sub(r'endTime\s+[\d.]+\s*;', 'endTime 12;', txt)
-        txt = re.sub(r'writeInterval\s+[\d.]+\s*;', 'writeInterval 12;', txt)
-        ctrl.write_text(txt)
-
-
-N_CORES = 16   # set to your CPU core count (check with: nproc)
 
 def run_case(run_dir):
-    """surfaceFeatureExtract → blockMesh → snappyHexMesh → setFields → interFoam (parallel)."""
-    OF  = 'source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null'
-
+    """cartesianMesh → setFields → decomposePar → interFoam → reconstructPar."""
     steps = [
-        ('surfaceFeatureExtract',              f'surfaceFeatureExtract'),
-        ('blockMesh',                          f'blockMesh'),
-        ('snappyHexMesh',                      f'snappyHexMesh -overwrite'),
-        ('setFields',                          f'setFields'),
+        ('cartesianMesh', 'cartesianMesh'),
+        ('setFields',     'setFields'),
         ('decomposePar',  f'decomposePar -force'),
         ('interFoam',     f'mpirun --use-hwthread-cpus -np {N_CORES} interFoam -parallel'),
+        ('reconstructPar','reconstructPar -latestTime'),
     ]
 
     for label, cmd in steps:
-        t0  = time.time()
+        t0   = time.time()
         full = f'{OF}; {cmd} > log.{label} 2>&1'
         ret  = subprocess.run(['bash', '--norc', '--noprofile', '-c', full], cwd=run_dir)
         elapsed = time.time() - t0
         status  = 'ok' if ret.returncode == 0 else 'FAILED'
-        print(f'  {label:25s} {status}  ({elapsed:.0f}s)')
+        print(f'  {label:20s} {status}  ({elapsed:.0f}s)')
         if ret.returncode != 0:
             log = run_dir / f'log.{label}'
             if log.exists():
-                lines = log.read_text().splitlines()
-                print('\n'.join(lines[-20:]))
+                print('\n'.join(log.read_text().splitlines()[-20:]))
             raise RuntimeError(f'{label} failed')
 
 
 def extract_drag(run_dir):
-    """
-    Parse postProcessing/forces/*/force.dat and return mean drag (N)
+    """Parse postProcessing/forces/*/force*.dat, return mean drag (N)
     averaged over the last 20% of simulation time (quasi-steady state).
-    Columns: time  (Fp_x Fp_y Fp_z)  (Fv_x Fv_y Fv_z)  (Fw_x Fw_y Fw_z)
-    Drag = Fp_x + Fv_x
+    Drag = pressure_x + viscous_x
     """
     candidates = sorted((run_dir / 'postProcessing').rglob('force*.dat'))
     if not candidates:
@@ -249,43 +293,57 @@ def extract_drag(run_dir):
     if not rows:
         raise ValueError('force.dat is empty or unparseable')
 
-    # Average over last 20% of time steps for quasi-steady result
     n_avg = max(1, len(rows) // 5)
     drag_values = [abs(r[1] + r[4]) for r in rows[-n_avg:]]
     return float(np.mean(drag_values))
 
 
-# ── Objective ──────────────────────────────────────────────────
-_n = [0]
+# ── Optuna objective ────────────────────────────────────────────
+def make_objective(base_params, speed_ms, log_rows):
+    import optuna
 
-def objective(x, param_names, base_params, speed_ms, log_rows, fidelity='high'):
-    _n[0] += 1
-    n      = _n[0]
-    params = {**base_params, **dict(zip(param_names, map(float, x)))}
-    run_dir = WORK_DIR / f'run_{n:04d}_{fidelity}'
+    def objective(trial):
+        # Suggest parameter values from search space
+        params = {**base_params}
+        for name, (lo, hi) in SEARCH_SPACE.items():
+            params[name] = trial.suggest_float(name, lo, hi)
 
-    print(f'\n{"="*55}  Eval {n} [{fidelity}]  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
-    for k, v in zip(param_names, x):
-        print(f'  {k:12s} = {v:.1f}')
+        n       = trial.number + 1
+        run_dir = WORK_DIR / f'run_{n:04d}'
 
-    drag, status = 1e6, 'error'
-    try:
-        stl  = build_stl_bytes(params)
-        setup_case(run_dir, stl, speed_ms, fidelity=fidelity)
-        run_case(run_dir)
-        drag   = extract_drag(run_dir)
-        status = 'ok'
-        print(f'  -> Drag = {drag:.3f} N')
-    except Exception as e:
-        print(f'  -> ERROR: {e}')
-        status = str(e)
+        print(f'\n{"="*55}  Trial {n}  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
+        for name in SEARCH_SPACE:
+            print(f'  {name:20s} = {params[name]:.1f}')
 
-    row = {'n': n, 'drag_N': round(drag, 4),
-           'status': status, 'speed_ms': speed_ms, 'fidelity': fidelity}
-    row.update(dict(zip(param_names, [round(float(v), 2) for v in x])))
-    log_rows.append(row)
-    pd.DataFrame(log_rows).to_csv(LOG_FILE, index=False)
-    return drag
+        # Check manufacturing constraint before running CFD
+        if not check_draft_angle(params):
+            print('  Pruning: draft angle constraint violated')
+            raise optuna.TrialPruned()
+
+        drag, status = 1e6, 'error'
+        try:
+            geom = build_geometry_stl(params)
+            setup_case(run_dir, geom, speed_ms)
+            run_case(run_dir)
+            drag   = extract_drag(run_dir)
+            status = 'ok'
+            print(f'  -> Drag = {drag:.3f} N')
+        except optuna.TrialPruned:
+            raise
+        except Exception as e:
+            print(f'  -> ERROR: {e}')
+            status = str(e)
+            raise optuna.TrialPruned()
+
+        row = {'n': n, 'drag_N': round(drag, 4),
+               'status': status, 'speed_ms': speed_ms}
+        row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
+        log_rows.append(row)
+        pd.DataFrame(log_rows).to_csv(LOG_FILE, index=False)
+
+        return drag
+
+    return objective
 
 
 # ── Main ───────────────────────────────────────────────────────
@@ -293,161 +351,77 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--speed',    type=float, default=3.601,
                     help='Boat speed m/s (default 3.601 ≈ 7.0 knots)')
-    ap.add_argument('--n-low',    type=int,   default=40,
-                    help='Stage 1: coarse-mesh evaluations (default 40)')
-    ap.add_argument('--n-high',   type=int,   default=20,
-                    help='Stage 2: fine-mesh evaluations (default 20)')
-    ap.add_argument('--top-k',    type=int,   default=5,
-                    help='Top-K coarse candidates to seed fine-mesh stage (default 5)')
-    ap.add_argument('--n-init',   type=int,   default=16,
-                    help='CMA-ES population size (default 16)')
-    ap.add_argument('--sigma0',   type=float, default=0.25,
-                    help='CMA-ES initial step size as fraction of range (default 0.25)')
+    ap.add_argument('--n-trials', type=int,   default=150,
+                    help='Number of Optuna trials (default 150)')
     ap.add_argument('--resume',   action='store_true',
-                    help='Resume from existing optimization_log.csv')
-    ap.add_argument('--stage',    type=int,   default=0,
-                    help='Start at stage 1 or 2 directly (default 0 = run both)')
+                    help='Resume from existing Optuna study database')
     ap.add_argument('--eval-best', action='store_true',
-                    help='Run a single fine-mesh evaluation on best_hull.json and exit')
+                    help='Run a single evaluation on best_hull.json and exit')
     args = ap.parse_args()
 
-    # ── Single fine-mesh eval of best_hull.json ─────────────────
-    if args.eval_best:
-        WORK_DIR.mkdir(parents=True, exist_ok=True)
-        base  = load_base_params()
-        names = list(SEARCH_SPACE.keys())
-        x     = [base.get(n, SEARCH_SPACE[n][0]) for n in names]
-        log_rows = []
-        if LOG_FILE.exists():
-            log_rows = pd.read_csv(LOG_FILE).to_dict('records')
-            _n[0]    = int(pd.read_csv(LOG_FILE)['n'].max())
-        drag = objective(x, names, base, args.speed, log_rows, fidelity='very_high')
-        print(f'\nVery-fine-mesh drag for best config: {drag:.3f} N')
-        return
-
     try:
-        import cma
+        import optuna
     except ImportError:
-        sys.exit('pip install cma')
+        sys.exit('pip install optuna')
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    base     = load_base_params()
+    log_rows = pd.read_csv(LOG_FILE).to_dict('records') if LOG_FILE.exists() else []
 
-    base   = load_base_params()
-    names  = list(SEARCH_SPACE.keys())
-    lows   = np.array([SEARCH_SPACE[n][0] for n in names], dtype=float)
-    highs  = np.array([SEARCH_SPACE[n][1] for n in names], dtype=float)
-    ranges = highs - lows
+    # ── Single eval of best_hull.json ───────────────────────────
+    if args.eval_best:
+        print('\nRunning single evaluation on best config...')
+        params  = {**base}
+        run_dir = WORK_DIR / 'run_eval_best'
+        try:
+            geom = build_geometry_stl(params)
+            setup_case(run_dir, geom, args.speed)
+            run_case(run_dir)
+            drag = extract_drag(run_dir)
+            print(f'\nDrag for best config: {drag:.3f} N')
+        except Exception as e:
+            print(f'ERROR: {e}')
+        return
 
-    log_rows = []
-    best_x   = None
-    best_f   = 1e6
+    # ── Optuna study ─────────────────────────────────────────────
+    storage    = f'sqlite:///{STUDY_DB}'
+    load_exist = args.resume and STUDY_DB.exists()
 
-    if args.resume and LOG_FILE.exists():
-        prev = pd.read_csv(LOG_FILE)
-        ok   = prev[prev['status'] == 'ok']
-        if not ok.empty:
-            log_rows = prev.to_dict('records')
-            _n[0]    = int(prev['n'].max())
-            best_row = ok.loc[ok['drag_N'].idxmin()]
-            best_f   = float(best_row['drag_N'])
-            best_x   = best_row[names].values.astype(float).tolist()
-            print(f'Resuming from {len(ok)} previous runs. Best so far: {best_f:.3f} N')
+    study = optuna.create_study(
+        study_name  = STUDY_NAME,
+        storage     = storage,
+        load_if_exists = load_exist,
+        direction   = 'minimize',
+        sampler     = optuna.samplers.TPESampler(seed=42),
+    )
 
-    def denorm(x_norm):
-        return np.clip(lows + np.array(x_norm) * ranges, lows, highs)
+    n_done = len([t for t in study.trials
+                  if t.state == optuna.trial.TrialState.COMPLETE])
+    print(f'\n{"="*55}')
+    print(f'Optuna TPE  |  budget={args.n_trials} trials  |  completed so far={n_done}')
+    print(f'Study DB    : {STUDY_DB}')
+    print(f'Params      : {list(SEARCH_SPACE.keys())}\n')
 
-    def run_cma(fidelity, n_evals, x0_norm, sigma0, label):
-        """Run CMA-ES at given fidelity. Returns (best_x, best_f, all results)."""
-        print(f'\n{"="*55}')
-        print(f'STAGE: {label}  |  fidelity={fidelity}  |  budget={n_evals} evals')
-        print(f'Params: {names}\n')
+    study.optimize(
+        make_objective(base, args.speed, log_rows),
+        n_trials = args.n_trials,
+    )
 
-        nonlocal log_rows
-        stage_best_x, stage_best_f = x0_norm, 1e6
-
-        def obj(x_norm):
-            nonlocal stage_best_x, stage_best_f
-            x = denorm(x_norm)
-            f = objective(x, names, base, args.speed, log_rows, fidelity=fidelity)
-            if f < stage_best_f:
-                stage_best_f = f
-                stage_best_x = list(x_norm)
-            return f
-
-        opts = cma.CMAOptions()
-        opts['bounds']    = [[0.0] * len(names), [1.0] * len(names)]
-        opts['maxfevals'] = n_evals
-        opts['popsize']   = args.n_init
-        opts['tolx']      = 1e-4
-        opts['tolfun']    = 0.5
-        opts['verbose']   = -9
-        opts['seed']      = 42
-
-        es = cma.CMAEvolutionStrategy(x0_norm, sigma0, opts)
-        while not es.stop():
-            solutions = es.ask()
-            fitnesses = [obj(x) for x in solutions]
-            es.tell(solutions, fitnesses)
-            print(f'  Gen best: {min(fitnesses):.3f} N  |  Stage best: {stage_best_f:.3f} N')
-
-        return stage_best_x, stage_best_f
-
-    # ── Stage 1: coarse mesh — broad exploration ────────────────
-    if args.stage in (0, 1):
-        # Start from hull_design.json values (clipped to search bounds)
-        base_x = np.clip([base.get(n, (lows[i]+highs[i])/2)
-                          for i, n in enumerate(names)], lows, highs)
-        x0 = ((base_x - lows) / ranges).tolist() if best_x is None else \
-             ((np.array(best_x) - lows) / ranges).tolist()
-
-        s1_best_norm, s1_best_f = run_cma(
-            fidelity='low',
-            n_evals=args.n_low,
-            x0_norm=x0,
-            sigma0=args.sigma0,
-            label='Stage 1 — coarse mesh',
-        )
-
-        # Pick top-K from coarse log to seed fine-mesh stage
-        df = pd.read_csv(LOG_FILE)
-        ok_low = df[(df['status'] == 'ok') & (df['fidelity'] == 'low')]
-        top_k  = ok_low.nsmallest(args.top_k, 'drag_N')
-        print(f'\nTop {args.top_k} coarse candidates (drag N):')
-        print(top_k[['drag_N'] + names].to_string(index=False))
-
-        # Best coarse candidate becomes the fine-mesh starting point
-        best_coarse_row = top_k.iloc[0]
-        s1_best_norm = ((best_coarse_row[names].values.astype(float) - lows) / ranges).tolist()
-        print(f'\nBest coarse drag: {s1_best_f:.3f} N  →  seeding fine-mesh stage')
-
-    # ── Stage 2: fine mesh — refine around best ─────────────────
-    if args.stage in (0, 2):
-        if args.stage == 2:
-            # Jump straight to stage 2: start from best_hull.json
-            s1_best_norm = ((np.array(best_x or [0.5]*len(names)) - lows) / ranges).tolist()
-
-        s2_best_norm, s2_best_f = run_cma(
-            fidelity='high',
-            n_evals=args.n_high,
-            x0_norm=s1_best_norm,
-            sigma0=0.1,        # tighter search around best coarse point
-            label='Stage 2 — fine mesh',
-        )
-
-        best_x = denorm(s2_best_norm).tolist()
-        best_f = s2_best_f
-
-    # ── Save best ───────────────────────────────────────────────
-    best = {**base, **dict(zip(names, map(float, best_x)))}
+    # ── Save best ────────────────────────────────────────────────
+    best_trial  = study.best_trial
+    best_params = {**base, **best_trial.params}
     BEST_FILE.write_text(json.dumps(
-        {k: round(float(v), 4) for k, v in best.items()}, indent=2))
+        {k: round(float(v), 4) for k, v in best_params.items()}, indent=2))
 
     print(f'\n{"="*55}')
-    print(f'Best drag: {best_f:.3f} N')
-    for k, v in zip(names, best_x):
-        print(f'  {k:12s} = {v:.1f}')
+    print(f'Best drag   : {best_trial.value:.3f} N  (trial #{best_trial.number + 1})')
+    for k, v in best_trial.params.items():
+        print(f'  {k:20s} = {v:.1f}')
     print(f'\nBest config -> {BEST_FILE}')
     print(f'Full log    -> {LOG_FILE}')
+    print(f'Study DB    -> {STUDY_DB}')
     print('\nTo use: copy best_hull.json over hull_design.json and reopen the app.')
 
 
