@@ -78,10 +78,9 @@ SEARCH_SPACE = {
 
     # Transom
     'transom_half_beam': (100, 250),
-    'transom_draft':     (40,  130),
 
-    # Bow entry
-    'bow_draft': (30, 120),
+    # Bow/stern draft — constrained equal (same mould depth at both ends)
+    'ends_draft': (30, 120),
 
     # Beam height (controls V vs U section shape)
     'p1_hz':  (0,  100),
@@ -307,6 +306,10 @@ def make_objective(base_params, speed_ms, log_rows):
         params = {**base_params}
         for name, (lo, hi) in SEARCH_SPACE.items():
             params[name] = trial.suggest_float(name, lo, hi)
+
+        # Expand shared ends_draft → bow and transom
+        params['bow_draft']     = params.pop('ends_draft')
+        params['transom_draft'] = params['bow_draft']
 
         n       = trial.number + 1
         run_dir = WORK_DIR / f'run_{n:04d}'
