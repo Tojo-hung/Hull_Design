@@ -73,6 +73,9 @@ if __name__ == '__main__':
     print('Patching controlDict...')
     patch_end_time(END_TIME)
 
+    # Recreate ParaView marker file (may have been wiped)
+    (RUN_DIR / 'test_mesh.foam').touch()
+
     print('\nRunning pipeline...')
     run_step('setFields',      'setFields')
     run_step('decomposePar',   'decomposePar -force')

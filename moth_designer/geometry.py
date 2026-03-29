@@ -343,6 +343,8 @@ def build_3d_mesh(params, N_X=80, N_T=36):
 
     for i, xi in enumerate(xs):
         hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
+        if i == 0:
+            hb = max(hb, 0.5)   # 1 mm flat bow face — prevents degenerate tip in STL/CFD mesh
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb,  clip_min=0.0)[0])
@@ -395,6 +397,16 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         ft += [[S + j, S + j + 1, S + N_T + j + 1],
                [S + j, S + N_T + j + 1, S + N_T + j]]
 
-    verts = np.vstack([vs_flat, vp_flat, stern_verts])
-    faces = np.array(fs + fp + fd + ft, dtype=np.int32)
+    # Bow cap — 1 mm flat face, normal pointing in -x (forward)
+    bv_s = vs[0]
+    bv_p = vp[0]
+    bow_verts = np.vstack([bv_s, bv_p]).astype(np.float32)
+    B = S + 2 * N_T          # index offset: after stern_verts block
+    fb = []
+    for j in range(N_T - 1):
+        fb += [[B + j + 1, B + j,     B + N_T + j],
+               [B + j + 1, B + N_T + j, B + N_T + j + 1]]
+
+    verts = np.vstack([vs_flat, vp_flat, stern_verts, bow_verts])
+    faces = np.array(fs + fp + fd + ft + fb, dtype=np.int32)
     return verts, faces
