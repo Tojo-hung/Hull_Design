@@ -100,7 +100,6 @@ def run_archimedes_check():
 
     geom = build_geometry_stl(DEFAULTS)
     setup_case(run_dir, geom, speed_ms=0.0)
-
     print("\n[2/4] Modifying case for static buoyancy test (U=0)...")
     modify_control_dict(run_dir, {'endTime': 5})
     u_file = run_dir / '0' / 'U'
