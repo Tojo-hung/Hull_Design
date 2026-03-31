@@ -130,19 +130,17 @@ def build_ctrl(p):
     raw_x  = np.array([p[f'p{i}_x']  for i in range(1, 5)])
     raw_hb = np.array([p[f'p{i}_hb'] for i in range(1, 5)])
     raw_d  = np.array([p[f'p{i}_d']  for i in range(1, 5)])
-    raw_dw = np.array([p[f'p{i}_dw'] for i in range(1, 5)])
     raw_dz = np.array([p[f'p{i}_dz'] for i in range(1, 5)])
     raw_kw = np.array([p[f'p{i}_kw'] for i in range(1, 5)])
     raw_hz = np.array([p.get(f'p{i}_hz', 0.0) for i in range(1, 5)])
     order  = np.argsort(raw_x)
     sx  = raw_x[order];  shb = raw_hb[order];  sd  = raw_d[order]
-    sdw = raw_dw[order]; sdz = raw_dz[order];  skw = raw_kw[order]
-    shz = raw_hz[order]
+    sdz = raw_dz[order]; skw = raw_kw[order];  shz = raw_hz[order]
 
     ctrl_x  = np.concatenate([[0.0],            sx, [float(LWL)]])
     beam_hb = np.concatenate([[0.0],            shb, [float(t_hb)]])
     keel_d  = np.concatenate([[float(b_draft)], sd,  [float(t_draft)]])
-    deck_hb = np.concatenate([[0.0],            sdw, [float(t_hb)]])
+    deck_hb = beam_hb.copy()   # deck width == half-beam at every station
     sheer_z = np.concatenate([[p['bow_sheer']], sdz, [p['transom_sheer']]])
     keel_w  = np.concatenate([[0.0],            skw, [float(p['transom_keel_w'])]])
     hb_z    = np.concatenate([[0.0],            shz, [0.0]])

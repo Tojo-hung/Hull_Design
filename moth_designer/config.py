@@ -44,7 +44,6 @@ for _i, (_px, _pb, _pd) in enumerate(_PT, 1):
     DEFAULTS[f'p{_i}_x']  = float(_px)
     DEFAULTS[f'p{_i}_hb'] = float(_pb)
     DEFAULTS[f'p{_i}_d']  = float(_pd)
-    DEFAULTS[f'p{_i}_dw'] = [90, 205, 255, 280][_i-1]
     DEFAULTS[f'p{_i}_dz'] = [150, 150, 150, 150][_i-1]
     DEFAULTS[f'p{_i}_kw'] = [1, 80, 110, 140][_i-1]
     DEFAULTS[f'p{_i}_hz'] = [120, 120, 0, 0][_i-1]

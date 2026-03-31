@@ -425,8 +425,7 @@ class MothDesigner(QMainWindow):
         dk_hdr_r = QHBoxLayout(dk_hdr_w)
         dk_hdr_r.setContentsMargins(0, 0, 0, 0); dk_hdr_r.setSpacing(4)
         dk_hdr_r.addWidget(QLabel(''), stretch=1)
-        for text, color in [('Deck width', '#4499ff'),
-                             ('Deck height', '#00ffaa'),
+        for text, color in [('Deck height', '#00ffaa'),
                              ('Keel width',  '#ff6b6b'),
                              ('HB offset',   '#ffaa33')]:
             lbl = QLabel(text)
@@ -447,7 +446,6 @@ class MothDesigner(QMainWindow):
             pt_lbl.setFixedWidth(32)
             row.addWidget(pt_lbl, stretch=1)
             for suffix, color, vmin, vmax in [
-                ('_dw', '#4499ff', 0,    500),
                 ('_dz', '#00ffaa', 0,    500),
                 ('_kw', '#ff6b6b', 0,    200),
                 ('_hz', '#ffaa33', -200, 200),
@@ -1006,7 +1004,6 @@ class MothDesigner(QMainWindow):
 
     def _print_config(self):
         p = self.params
-        dw = [int(p[f'p{i}_dw']) for i in range(1, 5)]
         dz = [int(p[f'p{i}_dz']) for i in range(1, 5)]
         kw = [int(p[f'p{i}_kw']) for i in range(1, 5)]
         hz = [int(p.get(f'p{i}_hz', 0)) for i in range(1, 5)]
@@ -1040,7 +1037,6 @@ class MothDesigner(QMainWindow):
         lines.append('    DEFAULTS[f\'p{_i}_x\']  = float(_px)')
         lines.append('    DEFAULTS[f\'p{_i}_hb\'] = float(_pb)')
         lines.append('    DEFAULTS[f\'p{_i}_d\']  = float(_pd)')
-        lines.append(f'    DEFAULTS[f\'p{{_i}}_dw\'] = {dw}[_i-1]')
         lines.append(f'    DEFAULTS[f\'p{{_i}}_dz\'] = {dz}[_i-1]')
         lines.append(f'    DEFAULTS[f\'p{{_i}}_kw\'] = {kw}[_i-1]')
         lines.append(f'    DEFAULTS[f\'p{{_i}}_hz\'] = {hz}[_i-1]')
