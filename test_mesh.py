@@ -25,7 +25,16 @@ def load_params():
     params = {k: float(v) for k, v in DEFAULTS.items()}
     if CONFIG_FILE.exists():
         data = json.loads(CONFIG_FILE.read_text())
-        params.update({k: float(v) for k, v in data.items() if k in params})
+        changed = False
+        for k, v in data.items():
+            if k in params:
+                new_val = float(v)
+                if params[k] != new_val:
+                    if not changed:
+                        print("  Parameters changed from defaults:")
+                        changed = True
+                    print(f"    {k:15s}: {params[k]:.1f} -> {new_val:.1f}")
+                params[k] = new_val
     return params
 
 
@@ -36,14 +45,23 @@ def run_step(label, cmd):
     lib_dir = Path(exe_path).parent.parent / 'lib'
     of_env = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
     t0  = time.time()
-    ret = subprocess.run(
+    print(f'  Starting {label}...')
+    process = subprocess.Popen(
         ['bash', '--norc', '--noprofile', '-c', f'{of_env}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd} > log.{label} 2>&1'],
         cwd=RUN_DIR
     )
+    while True:
+        try:
+            retcode = process.wait(timeout=60.0)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed_min = (time.time() - t0) / 60.0
+            print(f'    [{label}] Still running... ({elapsed_min:.1f} min elapsed)')
+
     elapsed = time.time() - t0
-    status  = 'OK' if ret.returncode == 0 else 'FAILED'
+    status  = 'OK' if retcode == 0 else 'FAILED'
     print(f'  {label:20s} {status}  ({elapsed:.0f}s)')
-    if ret.returncode != 0:
+    if retcode != 0:
         log = RUN_DIR / f'log.{label}'
         if log.exists():
             print('\n'.join(log.read_text().splitlines()[-30:]))
@@ -68,6 +86,9 @@ if __name__ == '__main__':
 
     print('Running cartesianMesh...')
     run_step('cartesianMesh', 'cartesianMesh')
+
+    print('\nChecking mesh quality...')
+    run_step('checkMesh', 'checkMesh')
 
     print('\n=== PASSED — mesh generated successfully ===')
     print(f'Inspect mesh: paraFoam -case {RUN_DIR}')

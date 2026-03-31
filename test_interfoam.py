@@ -18,14 +18,23 @@ END_TIME = 0.5   # seconds — just enough to see solver start and forces stabil
 
 def run_step(label, cmd, cwd=RUN_DIR):
     t0  = time.time()
-    ret = subprocess.run(
+    print(f'  Starting {label}...')
+    process = subprocess.Popen(
         ['bash', '--norc', '--noprofile', '-c', f'{OF}; {cmd} > log.{label} 2>&1'],
         cwd=cwd,
     )
+    while True:
+        try:
+            retcode = process.wait(timeout=60.0)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed_min = (time.time() - t0) / 60.0
+            print(f'    [{label}] Still running... ({elapsed_min:.1f} min elapsed)')
+
     elapsed = time.time() - t0
-    status  = 'OK' if ret.returncode == 0 else 'FAILED'
+    status  = 'OK' if retcode == 0 else 'FAILED'
     print(f'  {label:20s} {status}  ({elapsed:.0f}s)')
-    if ret.returncode != 0:
+    if retcode != 0:
         log = RUN_DIR / f'log.{label}'
         if log.exists():
             print('\n'.join(log.read_text().splitlines()[-40:]))

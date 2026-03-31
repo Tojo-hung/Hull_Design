@@ -44,6 +44,12 @@ STUDY_NAME   = 'moth_hull'
 N_CORES = 8   # set to your CPU core count (check with: nproc)
 OF      = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
 
+DOMAIN_BOUNDS = {
+    'xn': -1.0, 'xx': 5.0,  # m
+    'yn': -1.5, 'yx': 1.5,  # m
+    'zn': -0.8, 'zx': 0.5,  # m
+}
+
 sys.path.insert(0, str(ROOT))
 from moth_designer.config   import DEFAULTS, LWL, TARGET_DISP_L
 from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval,
@@ -209,10 +215,7 @@ def build_geometry_stl(params, N_X=250, N_T=100):
     lines.append('endsolid hull\n')
 
     # ── Domain bounding box ────────────────────────────────────
-    xn, xx = -1.0,  5.0
-    yn, yx = -1.5,  1.5
-    zn, zx = -0.8,  0.5
-
+    xn, xx, yn, yx, zn, zx = [DOMAIN_BOUNDS[k] for k in ['xn', 'xx', 'yn', 'yx', 'zn', 'zx']]
     # (name, tri1, tri2) — winding order gives inward-pointing normals
     box_tris = [
         ('inlet',
@@ -275,31 +278,113 @@ def setup_case(run_dir, geometry_stl, speed_ms):
     u_file.write_text(txt)
 
 
-def run_case(run_dir):
-    """cartesianMesh → setFields → decomposePar → interFoam → reconstructPar."""
-    steps = [
-        ('cartesianMesh', 'cartesianMesh'),
-        ('setFields',     'setFields'),
-        ('decomposePar',  f'decomposePar -force'),
-        ('interFoam',     f'mpirun --use-hwthread-cpus -np {N_CORES} interFoam -parallel'),
-        ('reconstructPar','reconstructPar -latestTime'),
-    ]
+def modify_control_dict(case_dir, settings):
+    """Programmatically changes settings in system/controlDict."""
+    cd_path = Path(case_dir) / 'system' / 'controlDict'
+    content = cd_path.read_text()
+    for key, value in settings.items():
+        content, count = re.subn(rf"({key}\s+)\S+;", rf"\g<1>{value};", content)
+        if count > 0:
+            print(f"  controlDict: Set {key} to {value}")
+    cd_path.write_text(content)
 
-    for label, cmd in steps:
-        exe_path = find_openfoam_exe(label)
-        run_cmd = cmd.replace(label, exe_path)
+
+def _run_foam_utility(label, cmd, cwd, check_log_for=None):
+    """Helper to run an OpenFOAM utility, log output, and check for success."""
+    cmds = cmd.split()
+    exe_name = cmds[0]
+
+    if exe_name == 'mpirun':
+        mpirun_path = shutil.which('mpirun')
+        if not mpirun_path:
+            raise FileNotFoundError("mpirun not found. Is OpenMPI installed?")
+        solver_name = next((arg for arg in cmds if 'Foam' in arg), None)
+        if not solver_name:
+            raise ValueError(f"Could not find OpenFOAM solver in mpirun command: {cmd}")
+        solver_path = find_openfoam_exe(solver_name)
+        run_cmd = cmd.replace('mpirun', mpirun_path).replace(solver_name, str(solver_path))
+        lib_dir = Path(solver_path).parent.parent / 'lib'
+    else:
+        exe_path = find_openfoam_exe(exe_name)
+        run_cmd = cmd.replace(exe_name, str(exe_path))
         lib_dir = Path(exe_path).parent.parent / 'lib'
-        t0   = time.time()
-        full = f'{OF}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd} > log.{label} 2>&1'
-        ret  = subprocess.run(['bash', '--norc', '--noprofile', '-c', full], cwd=run_dir)
-        elapsed = time.time() - t0
-        status  = 'ok' if ret.returncode == 0 else 'FAILED'
-        print(f'  {label:20s} {status}  ({elapsed:.0f}s)')
-        if ret.returncode != 0:
-            log = run_dir / f'log.{label}'
-            if log.exists():
-                print('\n'.join(log.read_text().splitlines()[-20:]))
-            raise RuntimeError(f'{label} failed')
+
+    log_path = cwd / f'log.{label}'
+    full_cmd = f'{OF}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd} > {log_path} 2>&1'
+
+    t0 = time.time()
+    print(f'  Starting {label}...')
+    process = subprocess.Popen(['bash', '--norc', '--noprofile', '-c', full_cmd], cwd=cwd)
+
+    while True:
+        try:
+            retcode = process.wait(timeout=60.0)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed_min = (time.time() - t0) / 60.0
+            print(f'    [{label}] Still running... ({elapsed_min:.1f} min elapsed)')
+
+    elapsed = time.time() - t0
+    status = 'ok' if retcode == 0 else 'FAILED'
+    print(f'  {label:25s} {status}  ({elapsed:.1f}s)')
+
+    log_content = log_path.read_text() if log_path.exists() else ""
+
+    if retcode != 0:
+        print('\n'.join(log_content.splitlines()[-20:]))
+        raise RuntimeError(f'{label} failed. See log: {log_path}')
+
+    if check_log_for and check_log_for not in log_content:
+        print('\n'.join(log_content.splitlines()[-20:]))
+        raise RuntimeError(f"'{check_log_for}' not found in log for {label}. See log: {log_path}")
+
+
+def patch_boundary_conditions(case_dir):
+    boundary_file = Path(case_dir) / 'constant' / 'polyMesh' / 'boundary'
+    if not boundary_file.is_file():
+        return
+    print('\n--- Patching Boundary Conditions ---')
+    content = boundary_file.read_text()
+    patch_types = {'inlet': 'patch', 'outlet': 'patch', 'atmosphere': 'patch',
+                   'bottom': 'wall', 'front': 'wall', 'back': 'wall', 'hull': 'wall'}
+    for patch_name, patch_type in patch_types.items():
+        pattern = re.compile(rf"({patch_name}\s+{{(?:(?!^\s*}}).)*?type\s+)\w+", re.DOTALL | re.MULTILINE)
+        content, count = pattern.subn(rf"\g<1>{patch_type}", content)
+        if count > 0: print(f"  {patch_name:12s} -> type {patch_type}")
+    boundary_file.write_text(content)
+    print('--- Boundary Patching Finished ---')
+
+
+def run_cfmesh_pipeline(case_dir):
+    print('\n--- Starting Professional cfMesh Pipeline ---')
+    case_dir = Path(case_dir)
+    tri_surface_dir = case_dir / 'constant' / 'triSurface'
+    stl_path = tri_surface_dir / 'geometry.stl'
+    fms_path = tri_surface_dir / 'geometry.fms'
+    if not stl_path.exists(): raise FileNotFoundError(f"STL file not found at {stl_path}")
+    _run_foam_utility('surfaceFeatureEdges', f'surfaceFeatureEdges -angle 15 {stl_path.name} {fms_path.name}', cwd=tri_surface_dir)
+    mesh_dict_path = case_dir / 'system' / 'meshDict'
+    md_text = mesh_dict_path.read_text()
+    md_text, count = re.subn(r'(surfaceFile\s+)"[^"]+"', rf'\1"constant/triSurface/{fms_path.name}"', md_text)
+    refinement_box = f"\nobjectRefinements\n{{\n    waterline\n    {{\n        type        box;\n        min         ({DOMAIN_BOUNDS['xn']} {DOMAIN_BOUNDS['yn']} -0.05);\n        max         ({DOMAIN_BOUNDS['xx']} {DOMAIN_BOUNDS['yx']} 0.05);\n        cellSize    0.005;\n    }}\n}}\n"
+    if 'objectRefinements' not in md_text: md_text = md_text.replace('\n// ************************************************************************* //', refinement_box + '\n// ************************************************************************* //', 1)
+    mesh_dict_path.write_text(md_text)
+    _run_foam_utility('cartesianMesh', 'cartesianMesh', cwd=case_dir)
+    _run_foam_utility('checkMesh', 'checkMesh -latestTime', cwd=case_dir, check_log_for='Mesh OK')
+    (case_dir / f'{case_dir.name}.foam').touch()
+    patch_boundary_conditions(case_dir)
+    print('--- cfMesh Pipeline Finished ---')
+
+
+def run_case(run_dir):
+    """Run the full CFD simulation for a given case directory."""
+    run_cfmesh_pipeline(run_dir)
+    print('\n--- Starting interFoam Simulation ---')
+    _run_foam_utility('setFields', 'setFields', cwd=run_dir)
+    _run_foam_utility('decomposePar', 'decomposePar -force', cwd=run_dir)
+    _run_foam_utility('interFoam', f'mpirun --use-hwthread-cpus -np {N_CORES} interFoam -parallel', cwd=run_dir)
+    _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
+    print('--- interFoam Simulation Finished ---\n')
 
 
 def extract_drag(run_dir):
