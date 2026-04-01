@@ -5,7 +5,7 @@
 
 import numpy as np
 from .config  import LWL, MAX_DEPTH, FREEBOARD
-from .geometry import build_ctrl, build_3d_mesh, beam_eval, lagrange, cross_section
+from .geometry import build_ctrl, build_3d_mesh, beam_eval, lagrange, cross_section_spline
 
 
 def export_txt(filepath, params, n_stations=20, n_t=32):
@@ -19,7 +19,7 @@ def export_txt(filepath, params, n_stations=20, n_t=32):
     Each station is a closed loop of X Y Z points separated by a blank line.
     In SolidWorks: Insert > Curve > Curve Through XYZ Points.
     """
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
     t_draft = params['transom_draft']
 
     x_orig = float(LWL)
@@ -33,10 +33,10 @@ def export_txt(filepath, params, n_stations=20, n_t=32):
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb, clip_min=0.0)[0])
-        dz_   = float(lagrange([xi], ctrl_x, sheer_z, clip_min=0.0)[0])
+        dz_   = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w,     clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
+        ys, zs = cross_section_spline(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
 
         x_sw = x_orig - xi
         for y, z in zip(ys, zs):
@@ -80,7 +80,7 @@ def export_step(filepath, params, n_stations=40, n_t=24):
     """
     import cadquery as cq
 
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
 
     xs = np.linspace(5.0, float(LWL), n_stations)
 
@@ -91,11 +91,11 @@ def export_step(filepath, params, n_stations=40, n_t=24):
                                    clip_min=0.0,
                                    clip_max=float(MAX_DEPTH))[0]), 1.0)
         dhb   = max(float(lagrange([xi], ctrl_x, deck_hb, clip_min=0.0)[0]), 1.0)
-        dz_   = max(float(lagrange([xi], ctrl_x, sheer_z, clip_min=0.0)[0]), 1.0)
+        dz_   = max(float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0]), 1.0)
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
 
-        ys_half, zs_half = cross_section(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
+        ys_half, zs_half = cross_section_spline(hb, depth, dhb, dz_, kw, n_t, hb_z=hz)
         ys_port = -ys_half[::-1]
         zs_port =  zs_half[::-1]
         y_all = np.concatenate([ys_half, ys_port[1:-1]])
@@ -145,10 +145,10 @@ def export_dxf_sections(filepath_or_folder, params, n_pts=3,
     import ezdxf
     import os
 
-    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
 
     xs = np.array(sorted(set(
-        [0.0] + [float(params[f'p{i}_x']) for i in range(1, 6)] + [float(LWL)]
+        [0.0] + [float(params[f'p{i}_x']) for i in range(1, 5)] + [float(LWL)]
     )))
 
     def _section_curve(xi):
@@ -157,10 +157,10 @@ def export_dxf_sections(filepath_or_folder, params, n_pts=3,
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
-        dz    = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
+        dz    = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
+        ys, zs = cross_section_spline(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
         # port side: mirror + reverse
         y_port = (-ys)[::-1];  z_port = zs[::-1]
         y_full = np.concatenate([y_port, ys[1:]])
@@ -231,7 +231,7 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     """
     import ezdxf
 
-    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = build_ctrl(params)
+    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
 
     lwl = float(LWL)
     gap = lwl * 0.12
@@ -249,7 +249,7 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     msp = doc.modelspace()
 
     xs = np.array(sorted(set(
-        [0.0] + [float(params[f'p{i}_x']) for i in range(1, 6)] + [lwl]
+        [0.0] + [float(params[f'p{i}_x']) for i in range(1, 5)] + [lwl]
     )))
 
     # ── Body plan ──────────────────────────────────────────────
@@ -258,10 +258,10 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
-        dz    = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
+        dz    = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
+        ys, zs = cross_section_spline(hb, depth, dhb, dz, kw, n_pts, hb_z=hz)
         y_p = (-ys)[::-1];  z_p = zs[::-1]
         y_f = np.concatenate([y_p, ys[1:]])
         z_f = np.concatenate([z_p, zs[1:]])
@@ -278,11 +278,11 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     x_dense = np.linspace(0.0, lwl, 300)
     keel_z  = -lagrange(x_dense, ctrl_x, keel_d,
                         clip_min=0.0, clip_max=float(MAX_DEPTH))
-    sheer_z = lagrange(x_dense, ctrl_x, sheer_z_c, clip_min=0.0)
+    sheer_z_line = lagrange(x_dense, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
 
     msp.add_lwpolyline([(prof_ox + x, z) for x, z in zip(x_dense, keel_z)],
                        dxfattribs={'layer': 'KEEL', 'color': 2})
-    msp.add_lwpolyline([(prof_ox + x, z) for x, z in zip(x_dense, sheer_z)],
+    msp.add_lwpolyline([(prof_ox + x, z) for x, z in zip(x_dense, sheer_z_line)],
                        dxfattribs={'layer': 'SHEER', 'color': 6})
     msp.add_line((prof_ox, 0), (prof_ox + lwl, 0),
                  dxfattribs={'layer': 'DWL', 'color': 5, 'linetype': 'DASHED'})
@@ -291,14 +291,14 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     t_hb    = params['transom_half_beam']
     t_draft = params['transom_draft']
     t_sheer = params['transom_sheer']
-    msp.add_line((prof_ox + lwl, -t_draft), (prof_ox + lwl, t_sheer),
+    msp.add_line((prof_ox + lwl, t_sheer), (prof_ox + lwl, -t_draft),
                  dxfattribs={'layer': 'SHEER', 'color': 6})
 
     # Station ticks on profile
     for xi in xs:
         kz = float(-lagrange([xi], ctrl_x, keel_d,
                              clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
-        sz = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
+        sz = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         msp.add_line((prof_ox + xi, kz), (prof_ox + xi, sz),
                      dxfattribs={'layer': 'STATION', 'color': 8})
 
@@ -313,10 +313,10 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
             depth = float(lagrange([xi], ctrl_x, keel_d,
                                    clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
             dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
-            dz_   = float(lagrange([xi], ctrl_x, sheer_z_c, clip_min=0.0)[0])
+            dz_   = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
             kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
             hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
-            ys, zs = cross_section(hb, depth, dhb, dz_, kw, 50, hb_z=hz)
+            ys, zs = cross_section_spline(hb, depth, dhb, dz_, kw, 50, hb_z=hz)
             for k in range(len(zs) - 1):
                 if (zs[k] - z_lev) * (zs[k + 1] - z_lev) <= 0:
                     f = (z_lev - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)

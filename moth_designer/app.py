@@ -22,7 +22,7 @@ try:
         QStatusBar, QSplitter,
     )
     from PyQt5.QtCore import Qt
-    from PyQt5.QtGui import QPalette, QColor, QFont
+    from PyQt5.QtGui import QPalette, QColor, QFont, QSurfaceFormat
     import pyqtgraph as pg
 except ImportError:
     print("Missing libraries. Install with:  pip install PyQt5 pyqtgraph")
@@ -34,10 +34,16 @@ from .config import (
     DEFAULTS,
 )
 from .geometry import (
-    lagrange, cross_section, cross_section_spline, build_ctrl, beam_eval,
+    lagrange, cross_section_spline, build_ctrl, beam_eval,
     displaced_volume, find_disp_waterline, hydrostatic_coefficients, build_3d_mesh,
 )
 from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
+
+PREVIEW_PROFILE_SAMPLES = 360
+PREVIEW_SECTION_SAMPLES = 90
+PREVIEW_WL_NX = 80
+PREVIEW_WL_SECTION_N = 36
+PREVIEW_WL_BISECT_ITERS = 22
 
 # ─────────────────────────────────────────────────────────────
 # Persistent config file  (saved next to the package)
@@ -215,6 +221,8 @@ class Hull3DView(QMainWindow):
     def _init_gl(self):
         gl = self._gl
         self.glw = gl.GLViewWidget()
+        if hasattr(self.glw, 'setFormat'):
+            self.glw.setFormat(QSurfaceFormat.defaultFormat())
         self.glw.setBackgroundColor('#0a0e17')
         self.setCentralWidget(self.glw)
 
@@ -262,20 +270,32 @@ class Hull3DView(QMainWindow):
                                         drawEdges=False, glOptions='opaque')
         self.glw.addItem(self._hull_item)
 
-        ctrl_x, beam_hb, keel_d, _, _, _, _, _, _, _ = build_ctrl(params)
-        dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d)
+        ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, *_ = build_ctrl(params)
+        deck_kw = dict(deck_x=ctrl_x, deck_hb_arr=deck_hb,
+                       sheer_z_arr=sheer_z, keel_w_arr=keel_w, hb_z_arr=hb_z_arr)
+        dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d,
+                                 n_x=PREVIEW_WL_NX, n_section=PREVIEW_WL_SECTION_N,
+                                 max_iter=PREVIEW_WL_BISECT_ITERS, **deck_kw)
         self._wl_item = None
         if dz < 0:
             xs_wl  = np.linspace(0, LWL, 200)
             hbs    = beam_eval(xs_wl, ctrl_x, beam_hb)
             depths = lagrange(xs_wl, ctrl_x, keel_d,
                               clip_min=0.0, clip_max=float(MAX_DEPTH))
+            dhbs   = lagrange(xs_wl, ctrl_x, deck_hb, clip_min=0.0)
+            sheers = lagrange(xs_wl, ctrl_x, sheer_z, clip_min=0.0)
+            kws    = lagrange(xs_wl, ctrl_x, keel_w, clip_min=0.0)
+            hzs    = lagrange(xs_wl, ctrl_x, hb_z_arr)
             wl_pts = []
-            for xi, hb, depth in zip(xs_wl, hbs, depths):
-                if depth <= 0:
+            for xi, hb, depth, dhb, sheer, kw, hz in zip(xs_wl, hbs, depths, dhbs, sheers, kws, hzs):
+                if depth <= 0 or dz < -depth or dz > sheer:
                     continue
-                cos_t = np.clip(-dz / depth, 0, 1)
-                wl_pts.append([xi, hb * np.sqrt(1 - cos_t ** 2), dz])
+                ys, zs = cross_section_spline(hb, depth, dhb, sheer, kw, 60, hb_z=hz)
+                for j in range(len(zs) - 1):
+                    if (zs[j] - dz) * (zs[j + 1] - dz) <= 0:
+                        f = (dz - zs[j]) / (zs[j + 1] - zs[j] + 1e-12)
+                        wl_pts.append([xi, ys[j] + f * (ys[j + 1] - ys[j]), dz])
+                        break
             if wl_pts:
                 stbd = np.array(wl_pts, dtype=np.float32)
                 port = stbd.copy(); port[:, 1] *= -1
@@ -307,9 +327,10 @@ class MothDesigner(QMainWindow):
         self._theme_name   = 'dark'
         self._measure_on   = False
         self._mouse_proxy  = None
+        self._redraw_in_progress = False
         self._setup_window()
         self._setup_plot_items()
-        self._redraw()
+        self._safe_redraw()
 
     # ── Window / layout ───────────────────────────────────────
 
@@ -476,6 +497,7 @@ class MothDesigner(QMainWindow):
             ('transom_half_beam', 'Half-beam (mm)',      0, 500),
             ('transom_sheer',     'Height (mm)',          0, 500),
             ('transom_keel_w',    'Keel width (mm)',      0, 500),
+            ('transom_hb_z',      'HB height (mm)',    -350, 500),
         ]:
             row_w = QWidget()
             row_w.setStyleSheet('background: transparent; border: none;')
@@ -492,15 +514,16 @@ class MothDesigner(QMainWindow):
             row.addWidget(edit)
             tr_layout.addWidget(row_w)
 
-        # Shared ends draft field — sets both bow_draft and transom_draft
+        # Shared hull draft field — sets both bow_draft and transom_draft
         row_w = QWidget(); row_w.setStyleSheet('background: transparent; border: none;')
         row = QHBoxLayout(row_w); row.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel('Ends draft (mm)')
+        lbl = QLabel('Hull draft (mm)')
         lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                           'border: none; background: transparent;')
         edit = make_field(DEFAULTS['transom_draft'], '#00d4aa', width=90, theme=t)
         edit.returnPressed.connect(self._make_ends_draft_updater(edit))
         edit.editingFinished.connect(self._make_ends_draft_updater(edit))
+        self.inputs['hull_draft'] = edit
         self.inputs['ends_draft'] = edit
         row.addWidget(lbl, stretch=1)
         row.addWidget(edit)
@@ -521,6 +544,7 @@ class MothDesigner(QMainWindow):
         bw_layout.addWidget(bw_title)
 
         for key, label, vmin, vmax in [
+            ('bow_draft',  'Draft (mm)',   0,   MAX_DEPTH),
             ('bow_sheer',  'Height (mm)',  0,   500),
         ]:
             row_w = QWidget()
@@ -840,7 +864,7 @@ class MothDesigner(QMainWindow):
                 pw.getAxis(axis).setPen(axis_pen)
                 pw.getAxis(axis).setTextPen(text_pen)
         self.status.setStyleSheet(f'color: {t["status_color"]}; font-size: 10px;')
-        self._redraw()
+        self._safe_redraw()
 
     # ── Callbacks ─────────────────────────────────────────────
 
@@ -850,9 +874,14 @@ class MothDesigner(QMainWindow):
             try:
                 val = float(self.inputs[key].text())
                 val = max(vmin, min(vmax, val))
+                if (abs(float(self.params.get(key, val)) - val) < 1e-9 and
+                        self.inputs[key].text() == f'{val:.0f}'):
+                    return
                 self.params[key] = val
                 self.inputs[key].setText(f'{val:.0f}')
-                self._redraw()
+                if key in ('bow_draft', 'transom_draft'):
+                    self._sync_draft_inputs()
+                self._safe_redraw()
             except ValueError:
                 self.inputs[key].setText(f'{self.params[key]:.0f}')
         return update
@@ -862,30 +891,54 @@ class MothDesigner(QMainWindow):
             try:
                 val = float(edit.text())
                 val = max(0, min(int(MAX_DEPTH), val))
+                if (abs(float(self.params.get('bow_draft', val)) - val) < 1e-9 and
+                        abs(float(self.params.get('transom_draft', val)) - val) < 1e-9 and
+                        edit.text() == f'{val:.0f}'):
+                    return
                 self.params['bow_draft']     = val
                 self.params['transom_draft'] = val
-                edit.setText(f'{val:.0f}')
-                self._redraw()
+                self._sync_draft_inputs()
+                self._safe_redraw()
             except ValueError:
                 edit.setText(f'{self.params["bow_draft"]:.0f}')
         return update
+
+    def _sync_draft_inputs(self):
+        if 'hull_draft' in self.inputs:
+            self.inputs['hull_draft'].setText(f'{self.params["transom_draft"]:.0f}')
+        if 'bow_draft' in self.inputs:
+            self.inputs['bow_draft'].setText(f'{self.params["bow_draft"]:.0f}')
+
+    def _safe_redraw(self):
+        if self._redraw_in_progress:
+            return
+        self._redraw_in_progress = True
+        try:
+            self._redraw()
+        except Exception as exc:
+            self.status.showMessage(f'Redraw error: {exc}', 8000)
+        finally:
+            self._redraw_in_progress = False
 
     def _reset(self):
         loaded = load_config()
         for key in self.params:
             self.params[key] = loaded[key]
-            if key in ('bow_draft', 'transom_draft'):
-                continue
-            self.inputs[key].setText(f'{loaded[key]:.0f}')
-        self.inputs['ends_draft'].setText(f'{loaded["bow_draft"]:.0f}')
+            if key in self.inputs and key not in ('hull_draft', 'ends_draft'):
+                self.inputs[key].setText(f'{loaded[key]:.0f}')
+        self._sync_draft_inputs()
         src = 'saved config' if _CONFIG_FILE.exists() else 'built-in defaults'
         self.status.showMessage(f'Reset to {src}', 3000)
-        self._redraw()
+        self._safe_redraw()
 
     def _open_3d_view(self):
         if self._3d_wi is None:
             self._3d_wi = Hull3DView(parent=self)
-        self._3d_wi.refresh(dict(self.params))
+        try:
+            self._3d_wi.refresh(dict(self.params))
+        except Exception as exc:
+            self.status.showMessage(f'3D view error: {exc}', 8000)
+            return
         self._3d_wi.show()
         self._3d_wi.raise_()
 
@@ -961,7 +1014,7 @@ class MothDesigner(QMainWindow):
         h = hydrostatic_coefficients(
             TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d,
             deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
-            sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c,
+            sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c,  # uses 6-pt sheer (hydrostatics)
             hb_z_arr=hb_z_c,
         )
         t = THEMES[self._theme_name]
@@ -1013,8 +1066,10 @@ class MothDesigner(QMainWindow):
             for key in self.params:
                 if key in data:
                     self.params[key] = float(data[key])
-                    self.inputs[key].setText(f'{self.params[key]:.0f}')
-            self._redraw()
+                    if key in self.inputs and key not in ('hull_draft', 'ends_draft'):
+                        self.inputs[key].setText(f'{self.params[key]:.0f}')
+            self._sync_draft_inputs()
+            self._safe_redraw()
             self.status.showMessage(f'Loaded: {path}', 4000)
         except Exception as e:
             self.status.showMessage(f'Error loading config: {e}', 5000)
@@ -1051,7 +1106,7 @@ class MothDesigner(QMainWindow):
         lines.append(']')
         lines.append(
             f"DEFAULTS = dict(transom_half_beam={p['transom_half_beam']:.1f},"
-            f" transom_draft={p['bow_draft']:.1f},"
+            f" transom_draft={p['transom_draft']:.1f},"
         )
         lines.append(
             f"                transom_sheer={p['transom_sheer']:.1f},"
@@ -1079,13 +1134,13 @@ class MothDesigner(QMainWindow):
         t_hb    = p['transom_half_beam']
         t_draft = p['transom_draft']
         b_draft = p['bow_draft']
-        ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, order, sx, shb = build_ctrl(p)
+        ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, order, sx, shb, sheer_ctrl_x, sheer_z_ext = build_ctrl(p)
 
-        x = np.linspace(0, LWL, 500)
+        x = np.linspace(0, LWL, PREVIEW_PROFILE_SAMPLES)
         beam_arr  = beam_eval(x, ctrl_x, beam_hb)
         depth_arr = lagrange(x, ctrl_x, keel_d,
                              clip_min=0.0, clip_max=float(MAX_DEPTH))
-        sheer_arr = lagrange(x, ctrl_x, sheer_z_c, clip_min=0.0)
+        sheer_arr = lagrange(x, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
         kz = -depth_arr
 
         # ── Profile ─────────────────────────────────────────
@@ -1094,7 +1149,7 @@ class MothDesigner(QMainWindow):
         self._p_keel.setData(x, kz)
         self._p_sheer.setData(x, sheer_arr)
         t_sheer = p['transom_sheer']
-        self._p_transom.setData([LWL, LWL], [-t_draft, t_sheer])
+        self._p_transom.setData([LWL, LWL], [t_sheer, -t_draft])
         ctrl_d = lagrange(sx, ctrl_x, keel_d, clip_min=0.0, clip_max=float(MAX_DEPTH))
         self._p_ctrl.setData(x=list(sx), y=list(-ctrl_d))
         self._p_bow_stem.setData([0.0, 0.0], [-b_draft, float(sheer_arr[0])])
@@ -1113,20 +1168,23 @@ class MothDesigner(QMainWindow):
             lbl.setPos(cx, cy + 14)
 
         # Waterlines
-        x_s         = np.linspace(0, LWL, 100)
+        x_s         = np.linspace(0, LWL, PREVIEW_SECTION_SAMPLES)
         hb_s        = beam_eval(x_s, ctrl_x, beam_hb)
         depth_s     = lagrange(x_s, ctrl_x, keel_d,    clip_min=0.0, clip_max=float(MAX_DEPTH))
         dhb_s       = lagrange(x_s, ctrl_x, deck_hb_c, clip_min=0.0)
-        sheer_s_arr = lagrange(x_s, ctrl_x, sheer_z_c, clip_min=0.0)
+        sheer_s_arr = lagrange(x_s, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
         keelw_s     = lagrange(x_s, ctrl_x, keel_w_c,  clip_min=0.0)
         hbz_s       = lagrange(x_s, ctrl_x, hb_z_c)
+        section_cache = [
+            cross_section_spline(hb_s[si], depth_s[si], None, sheer_s_arr[si], keelw_s[si],
+                                 50, hb_z=hbz_s[si])
+            for si in range(len(x_s))
+        ]
         z_levels    = np.linspace(-MAX_DEPTH * 0.9, -MAX_DEPTH * 0.1, N_WL)
         for ji, zl in enumerate(z_levels):
             px, py = [], []
             for si, xi in enumerate(x_s):
-                ys, zs = cross_section_spline(hb_s[si], depth_s[si], None,
-                                              sheer_s_arr[si], keelw_s[si], 50,
-                                              hb_z=hbz_s[si])
+                ys, zs = section_cache[si]
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1146,9 +1204,7 @@ class MothDesigner(QMainWindow):
         for ji, zl in enumerate(z_above):
             px, py = [], []
             for si, xi in enumerate(x_s):
-                ys, zs = cross_section_spline(hb_s[si], depth_s[si], None,
-                                              sheer_s_arr[si], keelw_s[si], 50,
-                                              hb_z=hbz_s[si])
+                ys, zs = section_cache[si]
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1168,7 +1224,7 @@ class MothDesigner(QMainWindow):
         sec_hb    = beam_eval(sec_xs, ctrl_x, beam_hb)
         sec_depth = lagrange(sec_xs, ctrl_x, keel_d,    clip_min=0.0, clip_max=float(MAX_DEPTH))
         sec_dhb   = lagrange(sec_xs, ctrl_x, deck_hb_c, clip_min=0.0)
-        sec_dz    = lagrange(sec_xs, ctrl_x, sheer_z_c, clip_min=0.0)
+        sec_dz    = lagrange(sec_xs, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
         sec_kw    = lagrange(sec_xs, ctrl_x, keel_w_c,  clip_min=0.0)
         sec_hz    = lagrange(sec_xs, ctrl_x, hb_z_c)
         mid_x = float(LWL) / 2.0
@@ -1182,21 +1238,26 @@ class MothDesigner(QMainWindow):
                 self._b_sections[i].setData(-ys, zs)   # aft → port (left)
 
         t_kw = p['transom_keel_w']
-        ty_tr, tz_tr = cross_section(t_hb, t_draft, t_hb, t_sheer, t_kw, 40)
+        t_hz = float(p.get('transom_hb_z', 0.0))
+        ty_tr, tz_tr = cross_section_spline(t_hb, t_draft, None, t_sheer, t_kw, 80, hb_z=t_hz)
         self._b_transom.setData(-ty_tr, tz_tr)
 
         # ── Displacement waterline ──────────────────────────
         deck_kw = dict(deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
-                       sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c)
+                       sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c, hb_z_arr=hb_z_c)
 
         # Total hull volume: integrate up to the highest sheer point
         max_sheer_z = float(np.max(sheer_z_c))
         total_vol = displaced_volume(max_sheer_z, ctrl_x, beam_hb,
-                                     ctrl_x, keel_d, **deck_kw)
+                                     ctrl_x, keel_d,
+                                     n_x=PREVIEW_WL_NX, n_section=PREVIEW_WL_SECTION_N,
+                                     **deck_kw)
 
         # Waterline z where cumulative volume (from keel up) = target
         dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
-                                 ctrl_x, keel_d, **deck_kw)
+                                 ctrl_x, keel_d,
+                                 n_x=PREVIEW_WL_NX, n_section=PREVIEW_WL_SECTION_N,
+                                 max_iter=PREVIEW_WL_BISECT_ITERS, **deck_kw)
 
         self._p_disp_wl.setPos(dz)
         if total_vol < TARGET_DISP_L:
@@ -1223,7 +1284,17 @@ class MothDesigner(QMainWindow):
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
+    fmt = QSurfaceFormat()
+    fmt.setRenderableType(QSurfaceFormat.OpenGL)
+    fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+    fmt.setVersion(2, 1)
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+    QApplication.setAttribute(Qt.AA_UseDesktopOpenGL)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName('Moth Hull Designer')
     apply_dark_theme(app)

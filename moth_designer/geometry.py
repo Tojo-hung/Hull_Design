@@ -78,8 +78,7 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
     if deck_z is None: deck_z = float(FREEBOARD)
     deck_z = max(float(deck_z), hb_z)
 
-    # Degenerate (bow/zero-beam) — return a vertical centreline stroke
-    if hb < 0.5:
+    if hb <= 1e-9:
         return np.array([0.0, 0.0]), np.array([-depth, deck_z])
 
     # ── Bilge spline knots (keel → max-beam only) ──────────────
@@ -94,6 +93,8 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
     pts    = np.column_stack([key_y, key_z])
     chords = np.sqrt(((np.diff(pts, axis=0)) ** 2).sum(axis=1))
     t      = np.concatenate([[0.0], np.cumsum(chords)])
+    if t[-1] <= 1e-12:
+        return np.array([0.0, 0.0]), np.array([-depth, deck_z])
     t     /= t[-1]
 
     # dy/dt = 0 at both ends: vertical centreline at keel, horizontal tangent at max-beam
@@ -129,7 +130,11 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
 
 
 def build_ctrl(p):
-    """Build PCHIP control arrays from the parameter dict."""
+    """Build desktop control arrays from the parameter dict.
+
+    Returns 12 values. The final two arrays mirror the sheer controls used by
+    geometry and export callers that expect explicit display arrays.
+    """
     t_hb    = p['transom_half_beam']
     t_draft = p['transom_draft']
     b_draft = p['bow_draft']
@@ -144,14 +149,17 @@ def build_ctrl(p):
     sdz = raw_dz[order]; skw = raw_kw[order];  shz = raw_hz[order]
 
     ctrl_x  = np.concatenate([[0.0],            sx, [float(LWL)]])
-    beam_hb = np.concatenate([[0.0],            shb, [float(t_hb)]])
+    beam_hb = np.concatenate([[float(p.get('bow_half_beam', 5.0))], shb, [float(t_hb)]])
     keel_d  = np.concatenate([[float(b_draft)], sd,  [float(t_draft)]])
     deck_hb = beam_hb.copy()   # deck width == half-beam at every station
     sheer_z = np.concatenate([[p['bow_sheer']], sdz, [p['transom_sheer']]])
     keel_w  = np.concatenate([[0.0],            skw, [float(p['transom_keel_w'])]])
-    hb_z    = np.concatenate([[0.0],            shz, [0.0]])
+    hb_z    = np.concatenate([[0.0],            shz, [float(p.get('transom_hb_z', 0.0))]])
 
-    return ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, order, sx, shb
+    sheer_ctrl_x = ctrl_x
+    sheer_z_ext  = sheer_z
+
+    return ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, order, sx, shb, sheer_ctrl_x, sheer_z_ext
 
 
 def beam_eval(x_eval, beam_x, beam_hb):
@@ -191,16 +199,16 @@ def _section_area_half_below(ys, zs, z_wl):
     return 0.5 * abs(float(np.sum(py[:-1] * pz[1:] - py[1:] * pz[:-1])))
 
 
-def section_area_full(hb, depth, deck_hb, deck_z, keel_w, z_wl, n=60):
+def section_area_full(hb, depth, deck_hb, deck_z, keel_w, z_wl, hb_z=0.0, n=60):
     """Full cross-section area (both sides) below z_wl (mm²).
     Includes the topside region above z=0 up to the deck edge."""
-    ys, zs = cross_section(hb, depth, deck_hb, deck_z, keel_w, n)
+    ys, zs = cross_section_spline(hb, depth, deck_hb, deck_z, keel_w, n, hb_z=hb_z)
     return 2.0 * _section_area_half_below(ys, zs, z_wl)
 
 
 def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d,
                      deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
-                     keel_w_arr=None, n_x=200):
+                     keel_w_arr=None, hb_z_arr=None, n_x=200, n_section=60):
     """Volume (litres) enclosed by the hull below z_wl.
     Pass deck_x/deck_hb_arr/sheer_z_arr/keel_w_arr to include topsides above z=0."""
     x_arr  = np.linspace(0.0, float(LWL), n_x)
@@ -212,32 +220,29 @@ def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d,
         dhbs  = lagrange(x_arr, deck_x, deck_hb_arr,  clip_min=0.0)
         sheer = lagrange(x_arr, deck_x, sheer_z_arr,  clip_min=0.0)
         kw    = lagrange(x_arr, deck_x, keel_w_arr,   clip_min=0.0)
+        hzs   = lagrange(x_arr, deck_x, hb_z_arr) if hb_z_arr is not None else np.zeros(n_x)
         areas = np.array([section_area_full(hbs[k], depths[k],
-                                            dhbs[k], sheer[k], kw[k], z_wl)
+                                            dhbs[k], sheer[k], kw[k], z_wl,
+                                            hb_z=hzs[k], n=n_section)
                           for k in range(n_x)])
     else:
-        # Legacy fast path: ellipse-only, below z=0
-        from scipy.interpolate import PchipInterpolator  # noqa (already imported via lagrange)
-        def _legacy(hb, depth, z):
-            if hb <= 0 or depth <= 0 or z <= -depth:
-                return 0.0
-            if z >= 0:
-                return np.pi / 2 * hb * depth
-            cos_t0 = np.clip(-z / depth, 0.0, 1.0)
-            t0 = np.arccos(cos_t0)
-            return 2.0 * hb * depth * (t0 / 2.0 - np.sin(2.0 * t0) / 4.0)
-        areas = np.array([_legacy(hbs[k], depths[k], z_wl) for k in range(n_x)])
+        areas = np.array([section_area_full(hbs[k], depths[k], hbs[k],
+                                            float(FREEBOARD), 0.0, z_wl,
+                                            n=n_section)
+                          for k in range(n_x)])
 
     return float(np.trapezoid(areas, x_arr)) / 1e6
 
 
 def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
                         deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
-                        keel_w_arr=None):
+                        keel_w_arr=None, hb_z_arr=None, n_x=200,
+                        n_section=60, max_iter=42):
     """Bisect to find z_wl where displaced_volume == target_l.
     When deck params are supplied the search extends up to the maximum sheer height."""
     kw = dict(deck_x=deck_x, deck_hb_arr=deck_hb_arr,
-              sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr)
+              sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr, hb_z_arr=hb_z_arr,
+              n_x=n_x, n_section=n_section)
 
     lo = -float(MAX_DEPTH)
     hi = float(np.max(sheer_z_arr)) if sheer_z_arr is not None else 0.0
@@ -249,7 +254,7 @@ def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
     if vol_lo >= target_l:
         return lo
 
-    for _ in range(42):
+    for _ in range(max_iter):
         mid = (lo + hi) / 2.0
         if displaced_volume(mid, beam_x, beam_hb, keel_x, keel_d, **kw) < target_l:
             lo = mid
@@ -279,7 +284,7 @@ def hydrostatic_coefficients(target_l, beam_x, beam_hb, keel_x, keel_d,
       V    – displacement (litres)
     """
     deck_kw = dict(deck_x=deck_x, deck_hb_arr=deck_hb_arr,
-                   sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr)
+                   sheer_z_arr=sheer_z_arr, keel_w_arr=keel_w_arr, hb_z_arr=hb_z_arr)
 
     z_wl = find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d, **deck_kw)
 
@@ -295,7 +300,7 @@ def hydrostatic_coefficients(target_l, beam_x, beam_hb, keel_x, keel_d,
     wl_hb   = np.zeros(n_x)
     sec_area = np.zeros(n_x)
     for k in range(n_x):
-        ys, zs = cross_section(hbs[k], depths[k], dhbs[k], sheers[k], kws[k], 60, hb_z=hzs[k])
+        ys, zs = cross_section_spline(hbs[k], depths[k], dhbs[k], sheers[k], kws[k], 60, hb_z=hzs[k])
         sec_area[k] = 2.0 * _section_area_half_below(ys, zs, z_wl)
         for j in range(len(zs) - 1):
             if (zs[j] - z_wl) * (zs[j + 1] - z_wl) <= 0:
@@ -337,8 +342,7 @@ def block_coefficient(*args, **kwargs):
 
 def build_3d_mesh(params, N_X=80, N_T=36):
     """Return (verts float32 (V,3), faces int32 (F,3)) for GLMeshItem."""
-    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _ = build_ctrl(params)
-
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
     xs    = np.linspace(0.0, float(LWL), N_X)
     t_new = np.linspace(0.0, 1.0, N_T)
 
@@ -347,12 +351,10 @@ def build_3d_mesh(params, N_X=80, N_T=36):
 
     for i, xi in enumerate(xs):
         hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
-        if i == 0:
-            hb = max(hb, 0.5)   # 1 mm flat bow face — prevents degenerate tip in STL/CFD mesh
         depth = float(lagrange([xi], ctrl_x, keel_d,
                                clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
         dhb   = float(lagrange([xi], ctrl_x, deck_hb,  clip_min=0.0)[0])
-        dz    = float(lagrange([xi], ctrl_x, sheer_z,  clip_min=0.0)[0])
+        dz    = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
         ys, zs = cross_section_spline(hb, depth, None, dz, kw, 40, hb_z=hz)
@@ -364,7 +366,8 @@ def build_3d_mesh(params, N_X=80, N_T=36):
 
     vs_flat = vs.reshape(-1, 3)
     vp_flat = vp.reshape(-1, 3)
-    OFF     = N_X * N_T
+    verts = np.vstack([vs_flat, vp_flat])
+    OFF   = N_X * N_T
 
     def quad_strip(row_i, row_j, offset_a=0, flip=False):
         tris = []
@@ -379,11 +382,13 @@ def build_3d_mesh(params, N_X=80, N_T=36):
                 tris += [[a, c, b], [a, d, c]]
         return tris
 
+    # Hull skin (starboard and port)
     fs, fp = [], []
     for i in range(N_X - 1):
         fs += quad_strip(i, i + 1, offset_a=0,   flip=False)
         fp += quad_strip(i, i + 1, offset_a=OFF, flip=True)
 
+    # Deck
     fd = []
     for i in range(N_X - 1):
         a  = i       * N_T + (N_T - 1)
@@ -392,25 +397,27 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         bp = OFF + (i + 1) * N_T + (N_T - 1)
         fd += [[a, b, bp], [a, bp, ap]]
 
-    sv = vs[-1]
-    pv = vp[-1]
-    stern_verts = np.vstack([sv, pv]).astype(np.float32)
-    S = 2 * OFF
+    # Transom face (aft-facing normal)
     ft = []
+    stbd_start = (N_X - 1) * N_T
+    port_start = OFF + (N_X - 1) * N_T
     for j in range(N_T - 1):
-        ft += [[S + j, S + j + 1, S + N_T + j + 1],
-               [S + j, S + N_T + j + 1, S + N_T + j]]
+        s_j  = stbd_start + j
+        s_j1 = stbd_start + j + 1
+        p_j  = port_start + j
+        p_j1 = port_start + j + 1
+        ft += [[s_j, p_j1, s_j1], [s_j, p_j, p_j1]]
 
-    # Bow cap — 1 mm flat face, normal pointing in -x (forward)
-    bv_s = vs[0]
-    bv_p = vp[0]
-    bow_verts = np.vstack([bv_s, bv_p]).astype(np.float32)
-    B = S + 2 * N_T          # index offset: after stern_verts block
+    # Bow cap (forward-facing normal)
     fb = []
+    stbd_start = 0
+    port_start = OFF
     for j in range(N_T - 1):
-        fb += [[B + j + 1, B + j,     B + N_T + j],
-               [B + j + 1, B + N_T + j, B + N_T + j + 1]]
+        s_j  = stbd_start + j
+        s_j1 = stbd_start + j + 1
+        p_j  = port_start + j
+        p_j1 = port_start + j + 1
+        fb += [[s_j1, p_j, s_j], [s_j1, p_j1, p_j]]
 
-    verts = np.vstack([vs_flat, vp_flat, stern_verts, bow_verts])
     faces = np.array(fs + fp + fd + ft + fb, dtype=np.int32)
     return verts, faces

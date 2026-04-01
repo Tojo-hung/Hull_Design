@@ -67,6 +67,12 @@ FIXED_X = {
     'p4_x': 2500,   # 75% LWL — aft shoulder
 }
 
+FIXED_PARAMS = {
+    'transom_half_beam': 195.0,
+    'transom_draft': 65.0,
+    'transom_sheer': 200.0,
+}
+
 SEARCH_SPACE = {
     # Midship (p3)
     'p3_hb':  (140, 270),   # half-beam (mm)
@@ -89,12 +95,7 @@ SEARCH_SPACE = {
     # Bow (p1) — no hz (too narrow to matter)
     'p1_hb':  (40,  160),   # half-beam
     'p1_d':   (50,  170),   # draft
-
-    # Transom
-    'transom_half_beam': (80, 270),
-
-    # Ends draft — bow and transom constrained equal
-    'ends_draft': (10, 140),
+    'bow_draft': (10, 140),
 }
 # ══════════════════════════════════════════════════════════════
 
@@ -137,9 +138,12 @@ def load_base_params():
         data   = json.loads(src.read_text())
         merged = {k: float(v) for k, v in DEFAULTS.items()}
         merged.update({k: float(v) for k, v in data.items() if k in merged})
+        merged.update(FIXED_PARAMS)
         print(f'Base params loaded from: {src.name}')
         return merged
-    return {k: float(v) for k, v in DEFAULTS.items()}
+    merged = {k: float(v) for k, v in DEFAULTS.items()}
+    merged.update(FIXED_PARAMS)
+    return merged
 
 
 def check_draft_angle(params, min_angle_deg=1.0):
@@ -171,18 +175,18 @@ def check_constraints(params):
     """Check prismatic coefficient and rocker before running CFD.
     Returns (ok: bool, reason: str).
 
-    Rocker = max perpendicular rise of the keel above the chord line
-    connecting the lowest bow point to the lowest stern point.
-    Since bow_draft == transom_draft (ends_draft), the chord is horizontal,
-    so rocker = max(keel_depth) - ends_draft.
+    Rocker = max rise of the keel above the straight chord line that joins
+    the lowest bow point to the lowest stern point.
     """
     ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, *_ = build_ctrl(params)
 
     # ── Rocker ────────────────────────────────────────────────
     x_arr   = np.linspace(0.0, float(LWL), 300)
     depths  = lagrange(x_arr, ctrl_x, keel_d, clip_min=0.0)
-    ends_d  = float(params['bow_draft'])   # == transom_draft
-    rocker  = float(np.max(depths)) - ends_d
+    bow_d   = float(params['bow_draft'])
+    stern_d = float(params['transom_draft'])
+    chord   = bow_d + (stern_d - bow_d) * (x_arr / float(LWL))
+    rocker  = float(np.max(depths - chord))
     if not (ROCKER_MIN <= rocker <= ROCKER_MAX):
         return False, f'rocker={rocker:.1f} mm  (need {ROCKER_MIN}–{ROCKER_MAX})'
 
@@ -220,7 +224,7 @@ def build_geometry_stl(params, N_X=250, N_T=100):
     All coordinates in metres.
     """
     # ── Hull ──────────────────────────────────────────────────
-    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, _, _, _ = \
+    ctrl_x, beam_hb, keel_d, deck_hb_c, sheer_z_c, keel_w_c, hb_z_c, *_ = \
         build_ctrl(params)
     dz_wl = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
                                  ctrl_x, keel_d,
@@ -506,10 +510,7 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
 
         # Inject fixed X positions
         params.update(FIXED_X)
-
-        # Expand shared ends_draft → bow and transom
-        params['bow_draft']     = params.pop('ends_draft')
-        params['transom_draft'] = params['bow_draft']
+        params.update(FIXED_PARAMS)
 
         # Fixed bow params
         params['p1_kw'] = 5.0
@@ -520,16 +521,14 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
 
         print(f'\n{"="*55}  Trial {n}  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
         for name in SEARCH_SPACE:
-            key = 'bow_draft' if name == 'ends_draft' else name
-            print(f'  {name:20s} = {params[key]:.1f}')
+            print(f'  {name:20s} = {params[name]:.1f}')
 
         # Check constraints before running CFD — log and prune if failed
         ok, reason = check_constraints(params)
         print(f'  Constraints: {reason}')
         if not ok:
             row = {'n': n, 'drag_N': None, 'status': f'pruned: {reason}', 'speed_ms': speed_ms}
-            row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
-                        for k in SEARCH_SPACE})
+            row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
             log_rows.append(row)
             pd.DataFrame(log_rows).to_csv(_log_file, index=False)
             raise optuna.TrialPruned()
@@ -552,16 +551,14 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
             print(f'  -> ERROR: {e}')
             status = str(e)
             row = {'n': n, 'drag_N': None, 'status': status, 'speed_ms': speed_ms}
-            row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
-                        for k in SEARCH_SPACE})
+            row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
             log_rows.append(row)
             pd.DataFrame(log_rows).to_csv(_log_file, index=False)
             raise optuna.TrialPruned()
 
         row = {'n': n, 'drag_N': round(drag, 4),
                'status': status, 'speed_ms': speed_ms}
-        row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
-                    for k in SEARCH_SPACE})
+        row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
         log_rows.append(row)
         pd.DataFrame(log_rows).to_csv(_log_file, index=False)
 

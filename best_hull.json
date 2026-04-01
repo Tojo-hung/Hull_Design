@@ -1,7 +1,7 @@
 {
-  "transom_half_beam": 200.0,
-  "transom_draft": 75.0,
-  "transom_sheer": 150.0,
+  "transom_half_beam": 195.0,
+  "transom_draft": 65.0,
+  "transom_sheer": 200.0,
   "transom_keel_w": 100.0,
   "bow_draft": 75.0,
   "bow_sheer": 150.0,
