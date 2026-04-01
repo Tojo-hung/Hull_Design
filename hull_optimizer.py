@@ -53,47 +53,48 @@ DOMAIN_BOUNDS = {
 sys.path.insert(0, str(ROOT))
 from moth_designer.config   import DEFAULTS, LWL, TARGET_DISP_L
 from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval,
-                                    find_disp_waterline)
+                                    find_disp_waterline, hydrostatic_coefficients,
+                                    lagrange)
 
 # ══════════════════════════════════════════════════════════════
 # SEARCH SPACE — edit bounds to suit your study
 # ══════════════════════════════════════════════════════════════
+# Fixed longitudinal positions (mm from bow) — not optimised
+FIXED_X = {
+    'p1_x': 335,    # 10% LWL — bow entry
+    'p2_x': 1000,   # 30% LWL — forward shoulder
+    'p3_x': 1700,   # 51% LWL — max section
+    'p4_x': 2500,   # 75% LWL — aft shoulder
+}
+
 SEARCH_SPACE = {
-    # Midship
-    'p3_hb':  (160, 220),   # midship half-beam (mm)
-    'p3_d':   (130, 195),   # midship draft
-    'p3_kw':  (80,  150),   # midship keel width
-    'p3_x':   (1800, 2100), # midship position
+    # Midship (p3)
+    'p3_hb':  (140, 270),   # half-beam (mm)
+    'p3_d':   (110, 215),   # draft
+    'p3_kw':  (60,  170),   # keel width
+    'p3_hz':  (-100, 100),  # beam height offset (V vs U shape)
 
-    # Forward section
-    'p2_hb':  (150, 230),   # forward half-beam
-    'p2_d':   (140, 210),   # forward draft
-    'p2_kw':  (20,  100),   # forward keel width
-    'p2_x':   (700, 1300),  # forward section position
+    # Forward (p2)
+    'p2_hb':  (130, 250),   # half-beam
+    'p2_d':   (120, 230),   # draft
+    'p2_kw':  (0,   120),   # keel width
+    'p2_hz':  (-100, 100),  # beam height offset
 
-    # Aft section
-    'p4_hb':  (165, 240),   # aft half-beam
-    'p4_d':   (130, 200),   # aft draft
-    'p4_kw':  (60,  160),   # aft keel width
-    'p4_x':   (2150, 2600), # aft position
+    # Aft (p4)
+    'p4_hb':  (145, 260),   # half-beam
+    'p4_d':   (110, 220),   # draft
+    'p4_kw':  (40,  180),   # keel width
+    'p4_hz':  (-100, 100),  # beam height offset
 
-    # Bow section
-    'p1_hb':  (60,  140),   # bow half-beam
-    'p1_d':   (70,  150),   # bow draft
-    'p1_kw':  (0,   30),    # bow keel width
-    'p1_x':   (200, 500),   # bow section position
+    # Bow (p1) — no hz (too narrow to matter)
+    'p1_hb':  (40,  160),   # half-beam
+    'p1_d':   (50,  170),   # draft
 
     # Transom
-    'transom_half_beam': (100, 250),
+    'transom_half_beam': (80, 270),
 
-    # Bow/stern draft — constrained equal (same mould depth at both ends)
-    'ends_draft': (30, 120),
-
-    # Beam height (controls V vs U section shape)
-    'p1_hz':  (0,  100),
-    'p2_hz':  (0,  150),
-    'p3_hz':  (0,  80),
-    'p4_hz':  (0,  100),
+    # Ends draft — bow and transom constrained equal
+    'ends_draft': (10, 140),
 }
 # ══════════════════════════════════════════════════════════════
 
@@ -160,6 +161,43 @@ def check_draft_angle(params, min_angle_deg=1.0):
         print(f'  Draft angle < {min_angle_deg}° detected — invalid geometry')
         return False
     return True
+
+
+CP_MIN, CP_MAX       = 0.55, 0.75
+ROCKER_MIN, ROCKER_MAX = 60.0, 130.0   # mm
+
+
+def check_constraints(params):
+    """Check prismatic coefficient and rocker before running CFD.
+    Returns (ok: bool, reason: str).
+
+    Rocker = max perpendicular rise of the keel above the chord line
+    connecting the lowest bow point to the lowest stern point.
+    Since bow_draft == transom_draft (ends_draft), the chord is horizontal,
+    so rocker = max(keel_depth) - ends_draft.
+    """
+    ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, *_ = build_ctrl(params)
+
+    # ── Rocker ────────────────────────────────────────────────
+    x_arr   = np.linspace(0.0, float(LWL), 300)
+    depths  = lagrange(x_arr, ctrl_x, keel_d, clip_min=0.0)
+    ends_d  = float(params['bow_draft'])   # == transom_draft
+    rocker  = float(np.max(depths)) - ends_d
+    if not (ROCKER_MIN <= rocker <= ROCKER_MAX):
+        return False, f'rocker={rocker:.1f} mm  (need {ROCKER_MIN}–{ROCKER_MAX})'
+
+    # ── Prismatic coefficient ──────────────────────────────────
+    hs = hydrostatic_coefficients(
+        TARGET_DISP_L, ctrl_x, beam_hb, ctrl_x, keel_d,
+        deck_x=ctrl_x, deck_hb_arr=deck_hb,
+        sheer_z_arr=sheer_z, keel_w_arr=keel_w,
+        hb_z_arr=hb_z,
+    )
+    cp = hs['Cp']
+    if np.isnan(cp) or not (CP_MIN <= cp <= CP_MAX):
+        return False, f'Cp={cp:.3f}  (need {CP_MIN}–{CP_MAX})'
+
+    return True, f'ok  Cp={cp:.3f}  rocker={rocker:.1f} mm'
 
 
 def build_geometry_stl(params, N_X=250, N_T=100):
@@ -250,6 +288,28 @@ def build_geometry_stl(params, N_X=250, N_T=100):
         lines.append(f'endsolid {name}\n')
 
     return ''.join(lines)
+
+
+FAST_MESH_DICT = """\
+FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
+surfaceFile     "constant/triSurface/geometry.stl";
+maxCellSize     0.20;
+boundaryCellSize                    0.06;
+boundaryCellSizeRefinementThickness 0.15;
+localRefinement { hull { cellSize 0.03; } }
+meshQualitySettings { maxNonOrthogonality 70; maxSkewness 6; minTetQuality -1e30; }
+"""
+
+
+def apply_fast_mode(run_dir, end_time=2.0):
+    """Coarse mesh + short sim for quick ranking. ~300k cells, ~5 min/trial on 8 cores."""
+    (run_dir / 'system' / 'meshDict').write_text(FAST_MESH_DICT)
+    ctrl = run_dir / 'system' / 'controlDict'
+    txt  = ctrl.read_text()
+    header, rest = txt.split('functions', 1)
+    header = re.sub(r'(endTime\s+)[\d.]+(\s*;)',      f'\\g<1>{end_time}\\2', header)
+    header = re.sub(r'(writeInterval\s+)[\d.]+(\s*;)', f'\\g<1>{end_time}\\2', header)
+    ctrl.write_text(header + 'functions' + rest)
 
 
 def setup_case(run_dir, geometry_stl, speed_ms):
@@ -418,8 +478,11 @@ def extract_drag(run_dir):
 
 
 # ── Optuna objective ────────────────────────────────────────────
-def make_objective(base_params, speed_ms, log_rows):
+def make_objective(base_params, speed_ms, log_rows, fast=False,
+                   work_dir=None, log_file=None):
     import optuna
+    _work_dir = work_dir or WORK_DIR
+    _log_file = log_file or LOG_FILE
 
     def objective(trial):
         # Suggest parameter values from search space
@@ -427,26 +490,44 @@ def make_objective(base_params, speed_ms, log_rows):
         for name, (lo, hi) in SEARCH_SPACE.items():
             params[name] = trial.suggest_float(name, lo, hi)
 
+        # Inject fixed X positions
+        params.update(FIXED_X)
+
         # Expand shared ends_draft → bow and transom
         params['bow_draft']     = params.pop('ends_draft')
         params['transom_draft'] = params['bow_draft']
 
+        # Fixed bow params
+        params['p1_kw'] = 5.0
+        params['p1_hz'] = 0.0
+
         n       = trial.number + 1
-        run_dir = WORK_DIR / f'run_{n:04d}'
+        run_dir = _work_dir / f'run_{n:04d}'
 
         print(f'\n{"="*55}  Trial {n}  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
         for name in SEARCH_SPACE:
-            print(f'  {name:20s} = {params[name]:.1f}')
+            key = 'bow_draft' if name == 'ends_draft' else name
+            print(f'  {name:20s} = {params[key]:.1f}')
 
-        # Check manufacturing constraint before running CFD
-        if not check_draft_angle(params):
-            print('  Pruning: draft angle constraint violated')
+        # Check constraints before running CFD — log and prune if failed
+        ok, reason = check_constraints(params)
+        print(f'  Constraints: {reason}')
+        if not ok:
+            row = {'n': n, 'drag_N': None, 'status': f'pruned: {reason}', 'speed_ms': speed_ms}
+            row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
+                        for k in SEARCH_SPACE})
+            log_rows.append(row)
+            pd.DataFrame(log_rows).to_csv(_log_file, index=False)
             raise optuna.TrialPruned()
 
         drag, status = 1e6, 'error'
         try:
-            geom = build_geometry_stl(params)
+            stl_nx = 60 if fast else 250
+            stl_nt = 24 if fast else 100
+            geom = build_geometry_stl(params, N_X=stl_nx, N_T=stl_nt)
             setup_case(run_dir, geom, speed_ms)
+            if fast:
+                apply_fast_mode(run_dir, end_time=2.0)
             run_case(run_dir)
             drag   = extract_drag(run_dir)
             status = 'ok'
@@ -456,13 +537,19 @@ def make_objective(base_params, speed_ms, log_rows):
         except Exception as e:
             print(f'  -> ERROR: {e}')
             status = str(e)
+            row = {'n': n, 'drag_N': None, 'status': status, 'speed_ms': speed_ms}
+            row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
+                        for k in SEARCH_SPACE})
+            log_rows.append(row)
+            pd.DataFrame(log_rows).to_csv(_log_file, index=False)
             raise optuna.TrialPruned()
 
         row = {'n': n, 'drag_N': round(drag, 4),
                'status': status, 'speed_ms': speed_ms}
-        row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
+        row.update({k: round(params['bow_draft' if k == 'ends_draft' else k], 2)
+                    for k in SEARCH_SPACE})
         log_rows.append(row)
-        pd.DataFrame(log_rows).to_csv(LOG_FILE, index=False)
+        pd.DataFrame(log_rows).to_csv(_log_file, index=False)
 
         return drag
 
@@ -476,10 +563,12 @@ def main():
                     help='Boat speed m/s (default 3.601 ≈ 7.0 knots)')
     ap.add_argument('--n-trials', type=int,   default=150,
                     help='Number of Optuna trials (default 150)')
-    ap.add_argument('--resume',   action='store_true',
+    ap.add_argument('--resume',    action='store_true',
                     help='Resume from existing Optuna study database')
     ap.add_argument('--eval-best', action='store_true',
                     help='Run a single evaluation on best_hull.json and exit')
+    ap.add_argument('--fast',      action='store_true',
+                    help='Low-fidelity mode: coarse mesh + 2s sim for quick exploration')
     args = ap.parse_args()
 
     try:
@@ -489,9 +578,14 @@ def main():
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    study_name = 'moth_hull_fast' if args.fast else STUDY_NAME
+    study_db   = ROOT / ('optuna_study_fast.db'      if args.fast else 'optuna_study.db')
+    log_file   = ROOT / ('optimization_log_fast.csv' if args.fast else 'optimization_log.csv')
+    work_dir   = Path.home() / ('openfoam_runs_fast' if args.fast else 'openfoam_runs')
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     base     = load_base_params()
-    log_rows = pd.read_csv(LOG_FILE).to_dict('records') if LOG_FILE.exists() else []
+    log_rows = pd.read_csv(log_file).to_dict('records') if log_file.exists() else []
 
     # ── Single eval of best_hull.json ───────────────────────────
     if args.eval_best:
@@ -509,26 +603,28 @@ def main():
         return
 
     # ── Optuna study ─────────────────────────────────────────────
-    storage    = f'sqlite:///{STUDY_DB}'
-    load_exist = args.resume and STUDY_DB.exists()
+    storage    = f'sqlite:///{study_db}'
+    load_exist = study_db.exists()
 
     study = optuna.create_study(
-        study_name  = STUDY_NAME,
-        storage     = storage,
+        study_name     = study_name,
+        storage        = storage,
         load_if_exists = load_exist,
-        direction   = 'minimize',
-        sampler     = optuna.samplers.TPESampler(seed=42),
+        direction      = 'minimize',
+        sampler        = optuna.samplers.TPESampler(seed=42),
     )
 
     n_done = len([t for t in study.trials
                   if t.state == optuna.trial.TrialState.COMPLETE])
     print(f'\n{"="*55}')
     print(f'Optuna TPE  |  budget={args.n_trials} trials  |  completed so far={n_done}')
-    print(f'Study DB    : {STUDY_DB}')
+    print(f'Study DB    : {study_db}')
+    print(f'Mode        : {"FAST (coarse mesh, 2s sim)" if args.fast else "full fidelity"}')
     print(f'Params      : {list(SEARCH_SPACE.keys())}\n')
 
     study.optimize(
-        make_objective(base, args.speed, log_rows),
+        make_objective(base, args.speed, log_rows, fast=args.fast,
+                       work_dir=work_dir, log_file=log_file),
         n_trials = args.n_trials,
     )
 
@@ -543,8 +639,8 @@ def main():
     for k, v in best_trial.params.items():
         print(f'  {k:20s} = {v:.1f}')
     print(f'\nBest config -> {BEST_FILE}')
-    print(f'Full log    -> {LOG_FILE}')
-    print(f'Study DB    -> {STUDY_DB}')
+    print(f'Full log    -> {log_file}')
+    print(f'Study DB    -> {study_db}')
     print('\nTo use: copy best_hull.json over hull_design.json and reopen the app.')
 
 

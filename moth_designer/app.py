@@ -448,7 +448,7 @@ class MothDesigner(QMainWindow):
             for suffix, color, vmin, vmax in [
                 ('_dz', '#00ffaa', 0,    500),
                 ('_kw', '#ff6b6b', 0,    200),
-                ('_hz', '#ffaa33', -200, 200),
+                ('_hz', '#ffaa33', -100, 100),
             ]:
                 key  = f'p{i}{suffix}'
                 edit = make_field(DEFAULTS[key], color, theme=t)
@@ -473,10 +473,9 @@ class MothDesigner(QMainWindow):
         tr_layout.addWidget(tr_title)
 
         for key, label, vmin, vmax in [
-            ('transom_half_beam', 'Half-beam (mm)', 0,   500),
-            ('transom_draft',     'Draft (mm)',      0,   MAX_DEPTH),
-            ('transom_sheer',     'Height (mm)',     0,   500),
-            ('transom_keel_w',    'Keel width (mm)', 0,   500),
+            ('transom_half_beam', 'Half-beam (mm)',      0, 500),
+            ('transom_sheer',     'Height (mm)',          0, 500),
+            ('transom_keel_w',    'Keel width (mm)',      0, 500),
         ]:
             row_w = QWidget()
             row_w.setStyleSheet('background: transparent; border: none;')
@@ -493,6 +492,20 @@ class MothDesigner(QMainWindow):
             row.addWidget(edit)
             tr_layout.addWidget(row_w)
 
+        # Shared ends draft field — sets both bow_draft and transom_draft
+        row_w = QWidget(); row_w.setStyleSheet('background: transparent; border: none;')
+        row = QHBoxLayout(row_w); row.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel('Ends draft (mm)')
+        lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
+                          'border: none; background: transparent;')
+        edit = make_field(DEFAULTS['transom_draft'], '#00d4aa', width=90, theme=t)
+        edit.returnPressed.connect(self._make_ends_draft_updater(edit))
+        edit.editingFinished.connect(self._make_ends_draft_updater(edit))
+        self.inputs['ends_draft'] = edit
+        row.addWidget(lbl, stretch=1)
+        row.addWidget(edit)
+        tr_layout.addWidget(row_w)
+
         outer.addWidget(tr_box)
 
         # ── Bow ──────────────────────────────────────────────
@@ -508,7 +521,6 @@ class MothDesigner(QMainWindow):
         bw_layout.addWidget(bw_title)
 
         for key, label, vmin, vmax in [
-            ('bow_draft',  'Draft (mm)',   0,   MAX_DEPTH),
             ('bow_sheer',  'Height (mm)',  0,   500),
         ]:
             row_w = QWidget()
@@ -845,11 +857,27 @@ class MothDesigner(QMainWindow):
                 self.inputs[key].setText(f'{self.params[key]:.0f}')
         return update
 
+    def _make_ends_draft_updater(self, edit):
+        def update():
+            try:
+                val = float(edit.text())
+                val = max(0, min(int(MAX_DEPTH), val))
+                self.params['bow_draft']     = val
+                self.params['transom_draft'] = val
+                edit.setText(f'{val:.0f}')
+                self._redraw()
+            except ValueError:
+                edit.setText(f'{self.params["bow_draft"]:.0f}')
+        return update
+
     def _reset(self):
         loaded = load_config()
         for key in self.params:
             self.params[key] = loaded[key]
+            if key in ('bow_draft', 'transom_draft'):
+                continue
             self.inputs[key].setText(f'{loaded[key]:.0f}')
+        self.inputs['ends_draft'].setText(f'{loaded["bow_draft"]:.0f}')
         src = 'saved config' if _CONFIG_FILE.exists() else 'built-in defaults'
         self.status.showMessage(f'Reset to {src}', 3000)
         self._redraw()
@@ -1023,7 +1051,7 @@ class MothDesigner(QMainWindow):
         lines.append(']')
         lines.append(
             f"DEFAULTS = dict(transom_half_beam={p['transom_half_beam']:.1f},"
-            f" transom_draft={p['transom_draft']:.1f},"
+            f" transom_draft={p['bow_draft']:.1f},"
         )
         lines.append(
             f"                transom_sheer={p['transom_sheer']:.1f},"
@@ -1096,9 +1124,9 @@ class MothDesigner(QMainWindow):
         for ji, zl in enumerate(z_levels):
             px, py = [], []
             for si, xi in enumerate(x_s):
-                ys, zs = cross_section(hb_s[si], depth_s[si], dhb_s[si],
-                                       sheer_s_arr[si], keelw_s[si], 50,
-                                       hb_z=hbz_s[si])
+                ys, zs = cross_section_spline(hb_s[si], depth_s[si], None,
+                                              sheer_s_arr[si], keelw_s[si], 50,
+                                              hb_z=hbz_s[si])
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1118,9 +1146,9 @@ class MothDesigner(QMainWindow):
         for ji, zl in enumerate(z_above):
             px, py = [], []
             for si, xi in enumerate(x_s):
-                ys, zs = cross_section(hb_s[si], depth_s[si], dhb_s[si],
-                                       sheer_s_arr[si], keelw_s[si], 50,
-                                       hb_z=hbz_s[si])
+                ys, zs = cross_section_spline(hb_s[si], depth_s[si], None,
+                                              sheer_s_arr[si], keelw_s[si], 50,
+                                              hb_z=hbz_s[si])
                 for k in range(len(zs) - 1):
                     if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
                         f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
@@ -1146,7 +1174,7 @@ class MothDesigner(QMainWindow):
         mid_x = float(LWL) / 2.0
         for i in range(len(sec_xs)):
             ys, zs = cross_section_spline(sec_hb[i], sec_depth[i],
-                                          sec_dhb[i], sec_dz[i], sec_kw[i], 80,
+                                          None, sec_dz[i], sec_kw[i], 80,
                                           hb_z=sec_hz[i])
             if sec_xs[i] <= mid_x:
                 self._b_sections[i].setData(ys, zs)    # forward → starboard (right)

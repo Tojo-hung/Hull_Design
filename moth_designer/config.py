@@ -33,18 +33,18 @@ N_SEC = len(SECTION_COLORS)
 #
 _PT = [
     (  335,   90,  110),   # Pt 1
-    ( 1100,  205,  155),   # Pt 2
-    ( 1700,  250,  175),   # Pt 3
-    ( 2300,  280,  160),   # Pt 4
+    ( 1000,  205,  155),   # Pt 2
+    ( 1700,  220,  175),   # Pt 3
+    ( 2500,  240,  160),   # Pt 4
 ]
-DEFAULTS = dict(transom_half_beam=270.0, transom_draft=75.0,
+DEFAULTS = dict(transom_half_beam=200.0, transom_draft=75.0,
                 transom_sheer=150.0, transom_keel_w=100.0,
-                bow_draft=70.0, bow_sheer=150.0)
+                bow_draft=75.0, bow_sheer=150.0)
 for _i, (_px, _pb, _pd) in enumerate(_PT, 1):
     DEFAULTS[f'p{_i}_x']  = float(_px)
     DEFAULTS[f'p{_i}_hb'] = float(_pb)
     DEFAULTS[f'p{_i}_d']  = float(_pd)
-    DEFAULTS[f'p{_i}_dz'] = [150, 150, 150, 150][_i-1]
-    DEFAULTS[f'p{_i}_kw'] = [1, 80, 110, 140][_i-1]
-    DEFAULTS[f'p{_i}_hz'] = [120, 120, 0, 0][_i-1]
+    DEFAULTS[f'p{_i}_dz'] = 150.0   # fixed — sheer height not optimised
+    DEFAULTS[f'p{_i}_kw'] = [5, 80, 110, 140][_i-1]
+    DEFAULTS[f'p{_i}_hz'] = [0, 0, 0, 0][_i-1]
 # ================================================================

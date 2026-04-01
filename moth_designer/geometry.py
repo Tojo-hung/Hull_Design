@@ -59,13 +59,15 @@ def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40, hb_z=0
 
 def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80, hb_z=0.0):
     """
-    Parametric cubic spline cross-section through the three structural points:
-      keel (0, -depth)  ->  half-beam (hb, hb_z)  ->  deck edge (deck_hb, deck_z)
+    Cubic spline bilge from keel → max-beam point, then a perfectly vertical
+    straight segment from max-beam up to the deck edge.
 
-    hb_z: z-height of the max-beam point (0 = design waterline, negative = submerged).
-    A flat keel of width keel_w is prepended when keel_w > 0.
-    Enforces a vertical tangent at the keel centreline (dy/dt = 0 at t=0)
-    so the curve meets the symmetry plane smoothly.
+    Boundary conditions:
+      - dy/dt = 0 at keel  (curve meets centreline symmetry plane vertically)
+      - dy/dt = 0 at max-beam  (horizontal tangent → smooth join to vertical topside)
+
+    hb_z: z-height of the max-beam point (0 = waterline, negative = submerged).
+    deck_hb is ignored — deck width is always equal to hb (set by build_ctrl).
     """
     from scipy.interpolate import CubicSpline
 
@@ -73,53 +75,57 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
     depth  = max(float(depth), 0.0)
     keel_w = min(max(float(keel_w), 0.0), hb)
     hb_z   = float(hb_z)
-    if deck_hb is None: deck_hb = hb
-    if deck_z  is None: deck_z  = float(FREEBOARD)
-    deck_hb = max(float(deck_hb), 0.0)
-    deck_z  = max(float(deck_z),  hb_z)
+    if deck_z is None: deck_z = float(FREEBOARD)
+    deck_z = max(float(deck_z), hb_z)
 
     # Degenerate (bow/zero-beam) — return a vertical centreline stroke
     if hb < 0.5:
         return np.array([0.0, 0.0]), np.array([-depth, deck_z])
 
-    # Structural knot points
+    # ── Bilge spline knots (keel → max-beam only) ──────────────
     if keel_w > 0:
-        key_y = np.array([0.0, keel_w, hb, deck_hb])
-        key_z = np.array([-depth, -depth, hb_z, deck_z])
+        key_y = np.array([0.0, keel_w, hb])
+        key_z = np.array([-depth, -depth, hb_z])
     else:
-        key_y = np.array([0.0, hb, deck_hb])
-        key_z = np.array([-depth, hb_z, deck_z])
+        key_y = np.array([0.0, hb])
+        key_z = np.array([-depth, hb_z])
 
     # Chord-length parameterisation
-    pts   = np.column_stack([key_y, key_z])
+    pts    = np.column_stack([key_y, key_z])
     chords = np.sqrt(((np.diff(pts, axis=0)) ** 2).sum(axis=1))
     t      = np.concatenate([[0.0], np.cumsum(chords)])
     t     /= t[-1]
 
-    # Spline for y: enforce dy/dt = 0 at the keel (vertical tangent → bilateral symmetry)
-    cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), 'not-a-knot'))
+    # dy/dt = 0 at both ends: vertical centreline at keel, horizontal tangent at max-beam
+    cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), (1, 0.0)))
     cs_z = CubicSpline(t, key_z, bc_type='natural')
 
-    # Dense sampling — give the flat keel its own segment
+    # Dense bilge sampling — give the flat keel its own segment
+    n_top = max(n // 5, 3)
+    n_bilge = n - n_top + 1
     if keel_w > 0:
-        t_flat = t[1]
-        n_flat = max(n // 8, 3)
-        t_bilge = np.linspace(t_flat, 1.0, n - n_flat + 1)
-        t_dense = np.concatenate([np.linspace(0.0, t_flat, n_flat),
-                                  t_bilge[1:]])
+        t_flat  = t[1]
+        n_flat  = max(n_bilge // 8, 3)
+        t_bilge = np.linspace(t_flat, 1.0, n_bilge - n_flat + 1)
+        t_dense = np.concatenate([np.linspace(0.0, t_flat, n_flat), t_bilge[1:]])
     else:
-        t_dense = np.linspace(0.0, 1.0, n)
+        t_dense = np.linspace(0.0, 1.0, n_bilge)
 
     ys = cs_y(t_dense)
     zs = cs_z(t_dense)
 
-    # Hard-clamp the flat keel so it stays truly flat
+    # Hard-clamp flat keel
     if keel_w > 0:
         flat = t_dense <= t[1] + 1e-9
         ys[flat] = np.linspace(0.0, keel_w, flat.sum())
         zs[flat] = -depth
 
-    return np.clip(ys, 0.0, None), zs
+    # ── Straight vertical topside ───────────────────────────────
+    y_top = np.full(n_top, hb)
+    z_top = np.linspace(hb_z, deck_z, n_top)
+
+    return np.concatenate([np.clip(ys, 0.0, None), y_top[1:]]), \
+           np.concatenate([zs, z_top[1:]])
 
 
 def build_ctrl(p):
@@ -349,7 +355,7 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         dz    = float(lagrange([xi], ctrl_x, sheer_z,  clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
-        ys, zs = cross_section(hb, depth, dhb, dz, kw, 40, hb_z=hz)
+        ys, zs = cross_section_spline(hb, depth, None, dz, kw, 40, hb_z=hz)
         t_src  = np.linspace(0.0, 1.0, len(ys))
         yr = np.interp(t_new, t_src, ys).astype(np.float32)
         zr = np.interp(t_new, t_src, zs).astype(np.float32)
