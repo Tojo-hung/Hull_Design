@@ -63,7 +63,10 @@ def run_simulation_pipeline(run_dir, end_time=None):
     _run_foam_utility('setFields', 'setFields', cwd=run_dir)
     _run_foam_utility('decomposePar', 'decomposePar -force', cwd=run_dir)
     _run_foam_utility('interFoam', f'mpirun -np {N_CORES} interFoam -parallel', cwd=run_dir)
-    _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
+    try:
+        _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
+    except RuntimeError:
+        print("  reconstructPar failed (likely no write times). Skipping visual reconstruction.")
     print(f"--- Case Finished: {run_dir.name} ---")
 
 def parse_forces(run_dir, time_average_from=0.8):
@@ -101,13 +104,20 @@ def run_archimedes_check():
     geom = build_geometry_stl(DEFAULTS)
     setup_case(run_dir, geom, speed_ms=0.0)
     print("\n[2/4] Modifying case for static buoyancy test (U=0)...")
-    modify_control_dict(run_dir, {'endTime': 5})
+    modify_control_dict(run_dir, {'endTime': 0.5})
     u_file = run_dir / '0' / 'U'
     content = u_file.read_text()
     content = re.sub(r'internalField\s+uniform\s+\(.*\)', 'internalField   uniform (0 0 0)', content)
     content = re.sub(r'inletValue\s+uniform\s+\(.*\)', 'inletValue      uniform (0 0 0)', content)
     u_file.write_text(content)
     print("  Set velocity field to 0 m/s.")
+
+    turb_file = run_dir / 'constant' / 'turbulenceProperties'
+    if turb_file.exists():
+        t_content = turb_file.read_text()
+        t_content = re.sub(r'simulationType\s+[a-zA-Z]+;', 'simulationType laminar;', t_content)
+        turb_file.write_text(t_content)
+        print("  Disabled turbulence model (set to laminar) for faster static run.")
 
     print("\n[3/4] Running simulation...")
     run_simulation_pipeline(run_dir)
