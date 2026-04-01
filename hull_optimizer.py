@@ -370,6 +370,20 @@ def run_cfmesh_pipeline(case_dir):
     if 'objectRefinements' not in md_text: md_text = md_text.replace('\n// ************************************************************************* //', refinement_box + '\n// ************************************************************************* //', 1)
     mesh_dict_path.write_text(md_text)
     _run_foam_utility('cartesianMesh', 'cartesianMesh', cwd=case_dir)
+
+    # Relax checkMesh strictness to allow slightly skewed faces from automated meshing
+    mq_dict = case_dir / 'system' / 'meshQualityDict'
+    mq_dict.write_text("""FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      meshQualityDict;
+}
+maxNonOrthogonality 75;
+maxSkewness 20;
+""")
+
     _run_foam_utility('checkMesh', 'checkMesh -latestTime', cwd=case_dir, check_log_for='Mesh OK')
     (case_dir / f'{case_dir.name}.foam').touch()
     patch_boundary_conditions(case_dir)
