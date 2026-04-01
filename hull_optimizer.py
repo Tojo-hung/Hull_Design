@@ -59,8 +59,8 @@ from moth_designer.geometry import (build_ctrl, build_3d_mesh, beam_eval,
 # ══════════════════════════════════════════════════════════════
 # SEARCH SPACE — edit bounds to suit your study
 # ══════════════════════════════════════════════════════════════
-# Fixed longitudinal positions (mm from bow) — not optimised
-FIXED_X = {
+# Longitudinal anchor positions (mm from bow)
+X_BASE = {
     'p1_x': 335,    # 10% LWL — bow entry
     'p2_x': 1000,   # 30% LWL — forward shoulder
     'p3_x': 1700,   # 51% LWL — max section
@@ -71,30 +71,41 @@ FIXED_PARAMS = {
     'transom_half_beam': 195.0,
     'transom_draft': 65.0,
     'transom_sheer': 200.0,
+    'p1_dz': 200.0,
+    'p2_dz': 200.0,
+    'p3_dz': 200.0,
+    'p4_dz': 200.0,
 }
 
 SEARCH_SPACE = {
+    # Station X positions
+    'p1_x':  (X_BASE['p1_x'] - 200, X_BASE['p1_x'] + 200),
+    'p2_x':  (X_BASE['p2_x'] - 200, X_BASE['p2_x'] + 200),
+    'p3_x':  (X_BASE['p3_x'] - 200, X_BASE['p3_x'] + 200),
+    'p4_x':  (X_BASE['p4_x'] - 200, X_BASE['p4_x'] + 200),
+
     # Midship (p3)
     'p3_hb':  (140, 270),   # half-beam (mm)
     'p3_d':   (110, 215),   # draft
-    'p3_kw':  (60,  170),   # keel width
+    'p3_kw':  (20,  150),   # keel width
     'p3_hz':  (-100, 100),  # beam height offset (V vs U shape)
 
     # Forward (p2)
     'p2_hb':  (130, 250),   # half-beam
     'p2_d':   (120, 230),   # draft
-    'p2_kw':  (0,   120),   # keel width
+    'p2_kw':  (5,    70),   # keel width
     'p2_hz':  (-100, 100),  # beam height offset
 
     # Aft (p4)
     'p4_hb':  (145, 260),   # half-beam
     'p4_d':   (110, 220),   # draft
-    'p4_kw':  (40,  180),   # keel width
+    'p4_kw':  (20,  150),   # keel width
     'p4_hz':  (-100, 100),  # beam height offset
 
     # Bow (p1) — no hz (too narrow to matter)
     'p1_hb':  (40,  160),   # half-beam
     'p1_d':   (50,  170),   # draft
+    'p1_kw':  (5,    70),   # keel width
     'bow_draft': (10, 140),
 }
 # ══════════════════════════════════════════════════════════════
@@ -132,8 +143,8 @@ def find_openfoam_exe(executable_name):
 
 
 def load_base_params():
-    """Load hull params, preferring best_hull.json over hull_design.json."""
-    src = BEST_FILE if BEST_FILE.exists() else CONFIG_FILE
+    """Load hull params, preferring hull_design.json over best_hull.json."""
+    src = CONFIG_FILE if CONFIG_FILE.exists() else BEST_FILE
     if src.exists():
         data   = json.loads(src.read_text())
         merged = {k: float(v) for k, v in DEFAULTS.items()}
@@ -508,12 +519,9 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
         for name, (lo, hi) in SEARCH_SPACE.items():
             params[name] = trial.suggest_float(name, lo, hi)
 
-        # Inject fixed X positions
-        params.update(FIXED_X)
         params.update(FIXED_PARAMS)
 
         # Fixed bow params
-        params['p1_kw'] = 5.0
         params['p1_hz'] = 0.0
 
         n       = trial.number + 1
@@ -652,7 +660,7 @@ def main():
     print(f'\nBest config -> {BEST_FILE}')
     print(f'Full log    -> {log_file}')
     print(f'Study DB    -> {study_db}')
-    print('\nTo use: copy best_hull.json over hull_design.json and reopen the app.')
+    print('\nTo use: load best_hull.json in the desktop app or copy values into hull_design.json.')
 
 
 if __name__ == '__main__':
