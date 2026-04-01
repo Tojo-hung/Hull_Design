@@ -71,9 +71,11 @@ def run_simulation_pipeline(run_dir, end_time=None):
 
 def parse_forces(run_dir, time_average_from=0.8):
     """Parses force.dat, returning mean forces and full history."""
-    force_file = run_dir / 'postProcessing' / 'forces' / '0' / 'force.dat'
-    if not force_file.exists():
-        raise FileNotFoundError(f"force.dat not found in {run_dir}")
+    post_dir = run_dir / 'postProcessing'
+    force_files = sorted(post_dir.rglob('force*.dat')) if post_dir.exists() else []
+    if not force_files:
+        raise FileNotFoundError(f"force.dat not found in {run_dir}/postProcessing. The solver likely exited before writing.")
+    force_file = force_files[-1]
 
     lines = force_file.read_text().splitlines()
     data = np.loadtxt([line for line in lines if not line.startswith('#')])
@@ -104,7 +106,8 @@ def run_archimedes_check():
     geom = build_geometry_stl(DEFAULTS)
     setup_case(run_dir, geom, speed_ms=0.0)
     print("\n[2/4] Modifying case for static buoyancy test (U=0)...")
-    modify_control_dict(run_dir, {'endTime': 0.5})
+    # Run for just a few steps, but force it to write data every single step
+    modify_control_dict(run_dir, {'endTime': 0.005, 'writeControl': 'timeStep', 'writeInterval': 1})
     u_file = run_dir / '0' / 'U'
     content = u_file.read_text()
     content = re.sub(r'internalField\s+uniform\s+\(.*\)', 'internalField   uniform (0 0 0)', content)
@@ -118,6 +121,16 @@ def run_archimedes_check():
         t_content = re.sub(r'simulationType\s+[a-zA-Z]+;', 'simulationType laminar;', t_content)
         turb_file.write_text(t_content)
         print("  Disabled turbulence model (set to laminar) for faster static run.")
+
+    # Disable surface tension to prevent spurious micro-currents in VOF
+    for prop_file_name in ['phaseProperties', 'transportProperties']:
+        prop_file = run_dir / 'constant' / prop_file_name
+        if prop_file.exists():
+            p_content = prop_file.read_text()
+            if 'sigma ' in p_content or 'sigma\t' in p_content:
+                p_content = re.sub(r'sigma\s+[\d\.eE+-]+;', 'sigma 0.0;', p_content)
+                prop_file.write_text(p_content)
+                print(f"  Disabled surface tension (sigma=0) in {prop_file_name}.")
 
     print("\n[3/4] Running simulation...")
     run_simulation_pipeline(run_dir)
