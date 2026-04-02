@@ -41,7 +41,8 @@ CONFIG_FILE  = ROOT / 'hull_design.json'
 STUDY_DB     = ROOT / 'optuna_study.db'
 STUDY_NAME   = 'moth_hull'
 
-N_CORES = 8   # set to your CPU core count (check with: nproc)
+DEFAULT_N_PROCS = 16
+FAST_END_TIME = 0.5
 OF      = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
 
 DOMAIN_BOUNDS = {
@@ -178,7 +179,7 @@ def check_draft_angle(params, min_angle_deg=1.0):
     return True
 
 
-CP_MIN, CP_MAX       = 0.55, 0.75
+CP_MIN, CP_MAX       = 0.55, 0.85
 ROCKER_MIN, ROCKER_MAX = 60.0, 130.0   # mm
 
 
@@ -190,12 +191,19 @@ def check_constraints(params):
     the lowest bow point to the lowest stern point.
     """
     ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z, *_ = build_ctrl(params)
+    bow_d   = float(params['bow_draft'])
+    stern_d = float(params['transom_draft'])
+    draft_floor = max(bow_d, stern_d)
+
+    # ── Station draft floor ───────────────────────────────────
+    for name in ('p1_d', 'p2_d', 'p3_d', 'p4_d'):
+        draft = float(params[name])
+        if draft < draft_floor:
+            return False, f'{name}={draft:.1f} mm  (need >= {draft_floor:.1f} mm from bow/transom draft)'
 
     # ── Rocker ────────────────────────────────────────────────
     x_arr   = np.linspace(0.0, float(LWL), 300)
     depths  = lagrange(x_arr, ctrl_x, keel_d, clip_min=0.0)
-    bow_d   = float(params['bow_draft'])
-    stern_d = float(params['transom_draft'])
     chord   = bow_d + (stern_d - bow_d) * (x_arr / float(LWL))
     rocker  = float(np.max(depths - chord))
     if not (ROCKER_MIN <= rocker <= ROCKER_MAX):
@@ -308,16 +316,16 @@ def build_geometry_stl(params, N_X=250, N_T=100):
 FAST_MESH_DICT = """\
 FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
 surfaceFile     "constant/triSurface/geometry.stl";
-maxCellSize     0.20;
-boundaryCellSize                    0.06;
-boundaryCellSizeRefinementThickness 0.15;
-localRefinement { hull { cellSize 0.03; } }
+maxCellSize     0.40;
+boundaryCellSize                    0.12;
+boundaryCellSizeRefinementThickness 0.24;
+localRefinement { hull { cellSize 0.07; } }
 meshQualitySettings { maxNonOrthogonality 70; maxSkewness 6; minTetQuality -1e30; }
 """
 
 
-def apply_fast_mode(run_dir, end_time=2.0):
-    """Coarse mesh + short sim for quick ranking. ~300k cells, ~5 min/trial on 8 cores."""
+def apply_fast_mode(run_dir, end_time=FAST_END_TIME):
+    """Laptop-friendly coarse mesh + short sim for quick ranking. Target ~30k cells."""
     (run_dir / 'system' / 'meshDict').write_text(FAST_MESH_DICT)
     ctrl = run_dir / 'system' / 'controlDict'
     txt  = ctrl.read_text()
@@ -430,6 +438,21 @@ def patch_boundary_conditions(case_dir):
     print('--- Boundary Patching Finished ---')
 
 
+def set_decompose_subdomains(case_dir, n_procs):
+    decompose_path = Path(case_dir) / 'system' / 'decomposeParDict'
+    if not decompose_path.is_file():
+        return
+    content = decompose_path.read_text()
+    content, count = re.subn(
+        r'(numberOfSubdomains\s+)\d+(\s*;)',
+        rf'\g<1>{n_procs}\2',
+        content,
+    )
+    if count > 0:
+        decompose_path.write_text(content)
+        print(f'  decomposeParDict: Set numberOfSubdomains to {n_procs}')
+
+
 def run_cfmesh_pipeline(case_dir):
     print('\n--- Starting Professional cfMesh Pipeline ---')
     case_dir = Path(case_dir)
@@ -465,13 +488,14 @@ maxSkewness 20;
     print('--- cfMesh Pipeline Finished ---')
 
 
-def run_case(run_dir):
+def run_case(run_dir, n_procs=DEFAULT_N_PROCS):
     """Run the full CFD simulation for a given case directory."""
     run_cfmesh_pipeline(run_dir)
     print('\n--- Starting interFoam Simulation ---')
     _run_foam_utility('setFields', 'setFields', cwd=run_dir)
+    set_decompose_subdomains(run_dir, n_procs)
     _run_foam_utility('decomposePar', 'decomposePar -force', cwd=run_dir)
-    _run_foam_utility('interFoam', f'mpirun --use-hwthread-cpus -np {N_CORES} interFoam -parallel', cwd=run_dir)
+    _run_foam_utility('interFoam', f'mpirun --use-hwthread-cpus -np {n_procs} interFoam -parallel', cwd=run_dir)
     _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
     print('--- interFoam Simulation Finished ---\n')
 
@@ -508,7 +532,7 @@ def extract_drag(run_dir):
 
 # ── Optuna objective ────────────────────────────────────────────
 def make_objective(base_params, speed_ms, log_rows, fast=False,
-                   work_dir=None, log_file=None):
+                   work_dir=None, log_file=None, n_procs=DEFAULT_N_PROCS):
     import optuna
     _work_dir = work_dir or WORK_DIR
     _log_file = log_file or LOG_FILE
@@ -516,8 +540,19 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
     def objective(trial):
         # Suggest parameter values from search space
         params = {**base_params}
+        draft_names = {'p1_d', 'p2_d', 'p3_d', 'p4_d'}
         for name, (lo, hi) in SEARCH_SPACE.items():
+            if name == 'bow_draft' or name in draft_names:
+                continue
             params[name] = trial.suggest_float(name, lo, hi)
+
+        bow_lo, bow_hi = SEARCH_SPACE['bow_draft']
+        params['bow_draft'] = trial.suggest_float('bow_draft', bow_lo, bow_hi)
+
+        draft_floor = max(float(params['bow_draft']), float(params['transom_draft']))
+        for name in ('p1_d', 'p2_d', 'p3_d', 'p4_d'):
+            lo, hi = SEARCH_SPACE[name]
+            params[name] = trial.suggest_float(name, max(lo, draft_floor), hi)
 
         params.update(FIXED_PARAMS)
 
@@ -548,8 +583,8 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
             geom = build_geometry_stl(params, N_X=stl_nx, N_T=stl_nt)
             setup_case(run_dir, geom, speed_ms)
             if fast:
-                apply_fast_mode(run_dir, end_time=2.0)
-            run_case(run_dir)
+                apply_fast_mode(run_dir, end_time=FAST_END_TIME)
+            run_case(run_dir, n_procs=n_procs)
             drag   = extract_drag(run_dir)
             status = 'ok'
             print(f'  -> Drag = {drag:.3f} N')
@@ -557,7 +592,7 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
             raise
         except Exception as e:
             print(f'  -> ERROR: {e}')
-            status = str(e)
+            status = f'failed: {e}'
             row = {'n': n, 'drag_N': None, 'status': status, 'speed_ms': speed_ms}
             row.update({k: round(params[k], 2) for k in SEARCH_SPACE})
             log_rows.append(row)
@@ -575,19 +610,46 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
     return objective
 
 
+def get_study_progress(study, optuna):
+    counts = {state.name.lower(): 0 for state in optuna.trial.TrialState}
+    for trial in study.trials:
+        counts[trial.state.name.lower()] += 1
+    counts['total'] = len(study.trials)
+    return counts
+
+
+def get_log_progress(log_rows):
+    counts = {'ok': 0, 'pruned': 0, 'failed': 0, 'other': 0, 'total': len(log_rows)}
+    for row in log_rows:
+        status = str(row.get('status', '')).strip().lower()
+        if status == 'ok':
+            counts['ok'] += 1
+        elif status.startswith('pruned:'):
+            counts['pruned'] += 1
+        elif status.startswith('failed:'):
+            counts['failed'] += 1
+        else:
+            counts['other'] += 1
+    return counts
+
+
 # ── Main ───────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--speed',    type=float, default=3.601,
                     help='Boat speed m/s (default 3.601 ≈ 7.0 knots)')
     ap.add_argument('--n-trials', type=int,   default=150,
-                    help='Number of Optuna trials (default 150)')
+                    help='Target number of completed Optuna trials / interFoam runs (default 150)')
     ap.add_argument('--resume',    action='store_true',
                     help='Resume from existing Optuna study database')
     ap.add_argument('--eval-best', action='store_true',
                     help='Run a single evaluation on best_hull.json and exit')
     ap.add_argument('--fast',      action='store_true',
-                    help='Low-fidelity mode: coarse mesh + 2s sim for quick exploration')
+                    help='Low-fidelity mode: coarse mesh + 0.5s sim for quick exploration')
+    ap.add_argument('--n-procs',   type=int, default=DEFAULT_N_PROCS,
+                    help='MPI ranks for interFoam (default 16 for 8C/16T laptop)')
+    ap.add_argument('--tag',       type=str, default='',
+                    help='Optional suffix for study/log/work dirs so a run starts cleanly')
     args = ap.parse_args()
 
     try:
@@ -597,10 +659,12 @@ def main():
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    study_name = 'moth_hull_fast' if args.fast else STUDY_NAME
-    study_db   = ROOT / ('optuna_study_fast.db'      if args.fast else 'optuna_study.db')
-    log_file   = ROOT / ('optimization_log_fast.csv' if args.fast else 'optimization_log.csv')
-    work_dir   = Path.home() / ('openfoam_runs_fast' if args.fast else 'openfoam_runs')
+    tag_suffix = f'_{args.tag}' if args.tag else ''
+    study_name = ('moth_hull_fast' if args.fast else STUDY_NAME) + tag_suffix
+    study_db   = ROOT / ((f'optuna_study_fast{tag_suffix}.db')      if args.fast else f'optuna_study{tag_suffix}.db')
+    log_file   = ROOT / ((f'optimization_log_fast{tag_suffix}.csv') if args.fast else f'optimization_log{tag_suffix}.csv')
+    work_dir   = Path.home() / ((f'openfoam_runs_fast{tag_suffix}') if args.fast else f'openfoam_runs{tag_suffix}')
+    best_file  = ROOT / (f'best_hull{tag_suffix}.json' if args.tag else BEST_FILE.name)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     base     = load_base_params()
@@ -614,7 +678,7 @@ def main():
         try:
             geom = build_geometry_stl(params)
             setup_case(run_dir, geom, args.speed)
-            run_case(run_dir)
+            run_case(run_dir, n_procs=args.n_procs)
             drag = extract_drag(run_dir)
             print(f'\nDrag for best config: {drag:.3f} N')
         except Exception as e:
@@ -633,31 +697,45 @@ def main():
         sampler        = optuna.samplers.TPESampler(seed=42),
     )
 
-    n_done = len([t for t in study.trials
-                  if t.state == optuna.trial.TrialState.COMPLETE])
+    progress = get_study_progress(study, optuna)
+    log_progress = get_log_progress(log_rows)
     print(f'\n{"="*55}')
-    print(f'Optuna TPE  |  budget={args.n_trials} trials  |  completed so far={n_done}')
+    print(f'Optuna TPE  |  target completed trials={args.n_trials}  |  completed so far={progress["complete"]}')
     print(f'Study DB    : {study_db}')
-    print(f'Mode        : {"FAST (coarse mesh, 2s sim)" if args.fast else "full fidelity"}')
+    print(f'Mode        : {f"FAST (coarse mesh, {FAST_END_TIME:.1f}s sim)" if args.fast else "full fidelity"}')
+    print(f'MPI ranks   : {args.n_procs}')
+    print(f'Tracked log : total={log_progress["total"]}  pruned={log_progress["pruned"]}  failed={log_progress["failed"]}')
     print(f'Params      : {list(SEARCH_SPACE.keys())}\n')
 
-    study.optimize(
-        make_objective(base, args.speed, log_rows, fast=args.fast,
-                       work_dir=work_dir, log_file=log_file),
-        n_trials = args.n_trials,
-    )
+    objective = make_objective(base, args.speed, log_rows, fast=args.fast,
+                               work_dir=work_dir, log_file=log_file,
+                               n_procs=args.n_procs)
+    while progress['complete'] < args.n_trials:
+        remaining = args.n_trials - progress['complete']
+        print(f'Running up to {remaining} more Optuna attempts to reach {args.n_trials} completed trials...')
+        study.optimize(objective, n_trials=remaining)
+        progress = get_study_progress(study, optuna)
+        log_progress = get_log_progress(log_rows)
+        print(f'Progress    : attempts={log_progress["total"]}  complete={progress["complete"]}  pruned={log_progress["pruned"]}  failed={log_progress["failed"]}')
+
+    if progress['complete'] == 0:
+        sys.exit('No completed trials are available yet, so there is no best hull to save.')
 
     # ── Save best ────────────────────────────────────────────────
     best_trial  = study.best_trial
     best_params = {**base, **best_trial.params}
-    BEST_FILE.write_text(json.dumps(
+    best_file.write_text(json.dumps(
         {k: round(float(v), 4) for k, v in best_params.items()}, indent=2))
 
     print(f'\n{"="*55}')
     print(f'Best drag   : {best_trial.value:.3f} N  (trial #{best_trial.number + 1})')
+    print(f'Completed   : {progress["complete"]} / {args.n_trials}')
+    print(f'Pruned      : {log_progress["pruned"]}')
+    print(f'Failed      : {log_progress["failed"]}')
+    print(f'Total tries : {log_progress["total"]}')
     for k, v in best_trial.params.items():
         print(f'  {k:20s} = {v:.1f}')
-    print(f'\nBest config -> {BEST_FILE}')
+    print(f'\nBest config -> {best_file}')
     print(f'Full log    -> {log_file}')
     print(f'Study DB    -> {study_db}')
     print('\nTo use: load best_hull.json in the desktop app or copy values into hull_design.json.')
