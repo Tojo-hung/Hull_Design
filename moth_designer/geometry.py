@@ -59,18 +59,18 @@ def cross_section(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=40, hb_z=0
 
 def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80, hb_z=0.0):
     """
-    Cubic spline bilge from keel → max-beam point, then a perfectly vertical
+    Cubic spline bilge from keel to max-beam point, then a perfectly vertical
     straight segment from max-beam up to the deck edge.
 
     Boundary conditions:
       - dy/dt = 0 at keel  (curve meets centreline symmetry plane vertically)
-      - dy/dt = 0 at max-beam  (horizontal tangent → smooth join to vertical topside)
+      - dy/dt = 0 at max-beam  (horizontal tangent -> smooth join to vertical topside)
 
     hb_z: z-height of the max-beam point (0 = waterline, negative = submerged).
-    deck_hb is ignored — deck width is always equal to hb (set by build_ctrl).
+    deck_hb is ignored - deck width is always equal to hb (set by build_ctrl).
+    If the spline overshoots on very slender bow sections, fall back to a
+    bounded easing curve so plan-view waterlines stay fair near the stem.
     """
-    from scipy.interpolate import CubicSpline
-
     hb     = max(float(hb),    0.0)
     depth  = max(float(depth), 0.0)
     keel_w = min(max(float(keel_w), 0.0), hb)
@@ -81,7 +81,30 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
     if hb <= 1e-9:
         return np.array([0.0, 0.0]), np.array([-depth, deck_z])
 
-    # ── Bilge spline knots (keel → max-beam only) ──────────────
+    n_top = max(n // 5, 3)
+    n_bilge = n - n_top + 1
+
+    def _bounded_bilge():
+        def smoothstep(u):
+            return u * u * (3.0 - 2.0 * u)
+
+        if keel_w > 0:
+            n_flat = max(n_bilge // 8, 3)
+            n_curve = max(n_bilge - n_flat + 1, 2)
+            u_curve = np.linspace(0.0, 1.0, n_curve)
+            s_curve = smoothstep(u_curve)
+            y_curve = keel_w + (hb - keel_w) * s_curve
+            z_curve = -depth + (hb_z + depth) * u_curve
+            y_flat = np.linspace(0.0, keel_w, n_flat)
+            z_flat = np.full(n_flat, -depth)
+            return np.concatenate([y_flat, y_curve[1:]]), np.concatenate([z_flat, z_curve[1:]])
+
+        u_curve = np.linspace(0.0, 1.0, n_bilge)
+        s_curve = smoothstep(u_curve)
+        return hb * s_curve, -depth + (hb_z + depth) * u_curve
+
+    from scipy.interpolate import CubicSpline
+
     if keel_w > 0:
         key_y = np.array([0.0, keel_w, hb])
         key_z = np.array([-depth, -depth, hb_z])
@@ -89,43 +112,41 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
         key_y = np.array([0.0, hb])
         key_z = np.array([-depth, hb_z])
 
-    # Chord-length parameterisation
     pts    = np.column_stack([key_y, key_z])
     chords = np.sqrt(((np.diff(pts, axis=0)) ** 2).sum(axis=1))
     t      = np.concatenate([[0.0], np.cumsum(chords)])
     if t[-1] <= 1e-12:
-        return np.array([0.0, 0.0]), np.array([-depth, deck_z])
-    t     /= t[-1]
-
-    # dy/dt = 0 at both ends: vertical centreline at keel, horizontal tangent at max-beam
-    cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), (1, 0.0)))
-    cs_z = CubicSpline(t, key_z, bc_type='natural')
-
-    # Dense bilge sampling — give the flat keel its own segment
-    n_top = max(n // 5, 3)
-    n_bilge = n - n_top + 1
-    if keel_w > 0:
-        t_flat  = t[1]
-        n_flat  = max(n_bilge // 8, 3)
-        t_bilge = np.linspace(t_flat, 1.0, n_bilge - n_flat + 1)
-        t_dense = np.concatenate([np.linspace(0.0, t_flat, n_flat), t_bilge[1:]])
+        ys, zs = _bounded_bilge()
     else:
-        t_dense = np.linspace(0.0, 1.0, n_bilge)
+        t /= t[-1]
+        cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), (1, 0.0)))
+        cs_z = CubicSpline(t, key_z, bc_type='natural')
 
-    ys = cs_y(t_dense)
-    zs = cs_z(t_dense)
+        if keel_w > 0:
+            t_flat  = t[1]
+            n_flat  = max(n_bilge // 8, 3)
+            t_bilge = np.linspace(t_flat, 1.0, n_bilge - n_flat + 1)
+            t_dense = np.concatenate([np.linspace(0.0, t_flat, n_flat), t_bilge[1:]])
+        else:
+            t_dense = np.linspace(0.0, 1.0, n_bilge)
 
-    # Hard-clamp flat keel
-    if keel_w > 0:
-        flat = t_dense <= t[1] + 1e-9
-        ys[flat] = np.linspace(0.0, keel_w, flat.sum())
-        zs[flat] = -depth
+        ys = cs_y(t_dense)
+        zs = cs_z(t_dense)
 
-    # ── Straight vertical topside ───────────────────────────────
+        if keel_w > 0:
+            flat = t_dense <= t[1] + 1e-9
+            ys[flat] = np.linspace(0.0, keel_w, flat.sum())
+            zs[flat] = -depth
+
+        # Slender bow sections can overshoot badly; fall back only when needed.
+        if np.max(ys) > hb + 1e-6 or np.min(ys) < -1e-6 or np.any(np.diff(ys) < -1e-6):
+            ys, zs = _bounded_bilge()
+
+    # Straight vertical topside.
     y_top = np.full(n_top, hb)
     z_top = np.linspace(hb_z, deck_z, n_top)
 
-    return np.concatenate([np.clip(ys, 0.0, None), y_top[1:]]), \
+    return np.concatenate([ys, y_top[1:]]), \
            np.concatenate([zs, z_top[1:]])
 
 
@@ -149,7 +170,8 @@ def build_ctrl(p):
     sdz = raw_dz[order]; skw = raw_kw[order];  shz = raw_hz[order]
 
     ctrl_x  = np.concatenate([[0.0],            sx, [float(LWL)]])
-    beam_hb = np.concatenate([[float(p.get('bow_half_beam', 5.0))], shb, [float(t_hb)]])
+    # Default to a true point bow unless an explicit bow half-beam override is provided.
+    beam_hb = np.concatenate([[float(p.get('bow_half_beam', 0.0))], shb, [float(t_hb)]])
     keel_d  = np.concatenate([[float(b_draft)], sd,  [float(t_draft)]])
     deck_hb = beam_hb.copy()   # deck width == half-beam at every station
     sheer_z = np.concatenate([[p['bow_sheer']], sdz, [p['transom_sheer']]])
@@ -338,6 +360,20 @@ def block_coefficient(*args, **kwargs):
     return hydrostatic_coefficients(*args, **kwargs)
 
 
+_BOW_MESH_RECT_HALF_BEAM = 0.5  # mm - tiny STL/GL starter face to avoid zero-area bow triangles
+
+
+def _bow_mesh_starter_section(depth, deck_z, half_beam, n=40):
+    """Return a tiny rectangular half-section used only for mesh generation."""
+    half_beam = max(float(half_beam), 1e-3)
+    depth = max(float(depth), 0.0)
+    deck_z = float(deck_z)
+
+    ys = np.full(n, half_beam)
+    zs = np.linspace(-depth, deck_z, n)
+    return ys, zs
+
+
 # ─── 3-D mesh ─────────────────────────────────────────────────
 
 def build_3d_mesh(params, N_X=80, N_T=36):
@@ -357,7 +393,11 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         dz    = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
-        ys, zs = cross_section_spline(hb, depth, None, dz, kw, 40, hb_z=hz)
+        if i == 0:
+            bow_half_beam = max(hb, float(params.get('bow_mesh_half_beam', _BOW_MESH_RECT_HALF_BEAM)))
+            ys, zs = _bow_mesh_starter_section(depth, dz, bow_half_beam, n=40)
+        else:
+            ys, zs = cross_section_spline(hb, depth, None, dz, kw, 40, hb_z=hz)
         t_src  = np.linspace(0.0, 1.0, len(ys))
         yr = np.interp(t_new, t_src, ys).astype(np.float32)
         zr = np.interp(t_new, t_src, zs).astype(np.float32)
