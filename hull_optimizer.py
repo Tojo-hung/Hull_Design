@@ -400,11 +400,17 @@ def modify_control_dict(case_dir, settings):
     """Programmatically changes settings in system/controlDict."""
     cd_path = Path(case_dir) / 'system' / 'controlDict'
     content = cd_path.read_text()
+
+    if 'functions' in content:
+        header, rest = content.split('functions', 1)
+    else:
+        header, rest = content, ''
+
     for key, value in settings.items():
-        content, count = re.subn(rf"({key}\s+)\S+;", rf"\g<1>{value};", content)
+        header, count = re.subn(rf"({key}\s+)\S+;", rf"\g<1>{value};", header)
         if count > 0:
             print(f"  controlDict: Set {key} to {value}")
-    cd_path.write_text(content)
+    cd_path.write_text(header + ('functions' + rest if rest else ''))
 
 
 def _run_foam_utility(label, cmd, cwd, check_log_for=None):
@@ -669,7 +675,10 @@ def run_lts_simulation(case_dir, n_cores=DEFAULT_N_PROCS):
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f'interFoam (LTS mode) failed with exit code {e.returncode}')
 
-    _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=case_dir)
+    try:
+        _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=case_dir)
+    except RuntimeError:
+        print("  reconstructPar failed (likely no write times). Skipping visual reconstruction.")
     print('--- interFoam (LTS mode) Simulation Finished ---\n')
 
 

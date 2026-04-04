@@ -231,7 +231,7 @@ def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d,
                                             n=n_section)
                           for k in range(n_x)])
 
-    return float(np.trapezoid(areas, x_arr)) / 1e6
+    return float(np.trapz(areas, x_arr)) / 1e6
 
 
 def find_disp_waterline(target_l, beam_x, beam_hb, keel_x, keel_d,
@@ -312,7 +312,7 @@ def hydrostatic_coefficients(target_l, beam_x, beam_hb, keel_x, keel_d,
     B_wl = 2.0 * float(np.max(wl_hb))
 
     # Waterplane area: integrate waterline half-beam along length
-    A_wp = float(np.trapezoid(2.0 * wl_hb, x_arr))
+    A_wp = float(np.trapz(2.0 * wl_hb, x_arr))
 
     # Midship section: station closest to LWL/2
     mid_idx = int(n_x // 2)
