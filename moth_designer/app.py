@@ -1182,15 +1182,20 @@ class MothDesigner(QMainWindow):
         ]
         z_levels    = np.linspace(-MAX_DEPTH * 0.9, -MAX_DEPTH * 0.1, N_WL)
         for ji, zl in enumerate(z_levels):
-            px, py = [], []
-            for si, xi in enumerate(x_s):
-                ys, zs = section_cache[si]
-                for k in range(len(zs) - 1):
-                    if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
-                        f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
-                        px.append(xi)
-                        py.append(float(ys[k] + f * (ys[k + 1] - ys[k])))
-                        break
+            if ji == N_WL - 1:
+                # Draw the shallowest plan-view guide from the keel-width controls.
+                px = list(x_s)
+                py = list(lagrange(x_s, ctrl_x, keel_w_c, clip_min=0.0))
+            else:
+                px, py = [], []
+                for si, xi in enumerate(x_s):
+                    ys, zs = section_cache[si]
+                    for k in range(len(zs) - 1):
+                        if (zs[k] - zl) * (zs[k + 1] - zl) <= 0:
+                            f = (zl - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
+                            px.append(xi)
+                            py.append(float(ys[k] + f * (ys[k + 1] - ys[k])))
+                            break
             if px:
                 self._pl_wl_s[ji].setData(px, py)
                 self._pl_wl_p[ji].setData(px, [-y for y in py])
