@@ -36,12 +36,14 @@ from hull_optimizer import (
     run_cfmesh_pipeline,
     _run_foam_utility,
     modify_control_dict,
-    DOMAIN_BOUNDS
+    DOMAIN_BOUNDS,
+    create_daily_run_dir,
+    run_lts_simulation
 )
 from moth_designer.config import DEFAULTS, TARGET_DISP_L, LWL
 
 # --- Global Constants --------------------------------------------------------
-RUNS_DIR = Path.home() / 'openfoam_runs' / 'validation'
+RUNS_DIR = ROOT / 'validation_runs'
 N_CORES = 8
 
 # Physical constants for water at 20°C
@@ -99,12 +101,11 @@ def parse_forces(run_dir, time_average_from=0.8):
 def run_archimedes_check():
     """Verifies that buoyant force on a static hull equals its displacement weight."""
     print("\n" + "="*70 + "\n--- V&V Test 1: Archimedes Buoyancy Check ---\n" + "="*70)
-    run_dir = RUNS_DIR / 'archimedes_check'
+    run_dir = create_daily_run_dir()
 
     print("\n[1/4] Setting up case with default parameters...")
-
     geom = build_geometry_stl(DEFAULTS)
-    setup_case(run_dir, geom, speed_ms=0.0)
+    setup_case(geom, speed_ms=0.0, run_dir=run_dir)
     print("\n[2/4] Modifying case for static buoyancy test (U=0)...")
     # Run for just a few steps, but force it to write data every single step
     modify_control_dict(run_dir, {'endTime': 0.005, 'writeControl': 'timeStep', 'writeInterval': 1})
@@ -157,10 +158,10 @@ def run_grid_convergence():
     results = []
 
     for i, (name, scale) in enumerate(mesh_levels.items()):
-        run_dir = RUNS_DIR / f'grid_study_{name}'
+        run_dir = create_daily_run_dir()
         print(f"\n--- [{i+1}/{len(mesh_levels)}] Starting mesh level: {name.upper()} (scale={scale}) ---")
         geom = build_geometry_stl(DEFAULTS)
-        setup_case(run_dir, geom, speed_ms=U_SIM)
+        setup_case(geom, speed_ms=U_SIM, run_dir=run_dir)
 
         mesh_dict_path = run_dir / 'system' / 'meshDict'
         content = mesh_dict_path.read_text()
@@ -168,7 +169,7 @@ def run_grid_convergence():
                          lambda m: f"{m.group(1)}{float(m.group(2))*scale:.4f};", content)
         mesh_dict_path.write_text(content)
 
-        run_simulation_pipeline(run_dir)
+        run_lts_simulation(run_dir, N_CORES)
         forces, _ = parse_forces(run_dir)
         checkmesh_log = (run_dir / 'log.checkMesh').read_text()
         cell_count = int(re.search(r'cells:\s+(\d+)', checkmesh_log).group(1))
@@ -184,9 +185,9 @@ def run_grid_convergence():
 def run_steady_state_check():
     """Runs a long simulation to find when drag force stabilizes."""
     print("\n" + "="*70 + "\n--- V&V Test 3: Steady-State Extraction Test ---\n" + "="*70)
-    run_dir = RUNS_DIR / 'steady_state_test'
+    run_dir = create_daily_run_dir()
     geom = build_geometry_stl(DEFAULTS)
-    setup_case(run_dir, geom, speed_ms=U_SIM)
+    setup_case(geom, speed_ms=U_SIM, run_dir=run_dir)
     run_simulation_pipeline(run_dir, end_time=20.0)
 
     _, history = parse_forces(run_dir)
@@ -210,12 +211,12 @@ def run_parameter_sweep():
     results = []
 
     for i, value in enumerate(np.linspace(base_val * 0.9, base_val * 1.1, 5)):
-        run_dir = RUNS_DIR / f'param_sweep_{i+1}'
+        run_dir = create_daily_run_dir()
         print(f"\n--- [{i+1}/5] Running sweep for {param} = {value:.1f} mm ---")
         params = DEFAULTS.copy(); params[param] = value
         geom = build_geometry_stl(params)
-        setup_case(run_dir, geom, speed_ms=U_SIM)
-        run_simulation_pipeline(run_dir)
+        setup_case(geom, speed_ms=U_SIM, run_dir=run_dir)
+        run_lts_simulation(run_dir, N_CORES)
         forces, _ = parse_forces(run_dir)
         results.append({'param_val': value, 'drag': forces['drag']})
 
@@ -227,7 +228,8 @@ def run_parameter_sweep():
 def run_ittc_friction_check():
     """Simulates a flat plate to validate skin friction against the ITTC line."""
     print("\n" + "="*70 + "\n--- V&V Test 5: ITTC-1957 Skin Friction Check ---\n" + "="*70)
-    run_dir, L, W = RUNS_DIR / 'ittc_check', LWL / 1000.0, 0.5
+    run_dir = create_daily_run_dir()
+    L, W = LWL / 1000.0, 0.5
 
     # Generate a simple flat plate STL
     pxn, pxx, pyn, pyx, pzn, pzx = 0, L, -W/2, W/2, -0.001, 0.001
@@ -243,7 +245,7 @@ def run_ittc_friction_check():
             geom_lines.append("    endloop\n  endfacet\n")
     geom_lines.append("endsolid plate\n")
 
-    setup_case(run_dir, "".join(geom_lines), speed_ms=U_SIM)
+    setup_case("".join(geom_lines), speed_ms=U_SIM, run_dir=run_dir)
     mesh_dict_path = run_dir / 'system' / 'meshDict'
     content = mesh_dict_path.read_text().replace('hull', 'plate')
     mesh_dict_path.write_text(content)

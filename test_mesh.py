@@ -81,7 +81,7 @@ if __name__ == '__main__':
     print(f'  {tris} triangles  ({chars//1024} KB)\n')
 
     print('Setting up case...')
-    setup_case(RUN_DIR, geom, speed_ms=3.601)
+    setup_case(geom, speed_ms=3.601, run_dir=RUN_DIR)
     print('  Done\n')
 
     print('Running cartesianMesh...')
