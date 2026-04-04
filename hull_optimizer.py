@@ -19,6 +19,7 @@ Evaluate best_hull.json once:
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -34,7 +35,6 @@ import pandas as pd
 # ── Paths ──────────────────────────────────────────────────────
 ROOT         = Path(__file__).parent
 TEMPLATE_DIR = ROOT / 'openfoam_template'
-WORK_DIR     = Path.home() / 'openfoam_runs'
 LOG_FILE     = ROOT / 'optimization_log.csv'
 BEST_FILE    = ROOT / 'best_hull.json'
 CONFIG_FILE  = ROOT / 'hull_design.json'
@@ -335,19 +335,53 @@ def apply_fast_mode(run_dir, end_time=FAST_END_TIME):
     ctrl.write_text(header + 'functions' + rest)
 
 
-def setup_case(run_dir, geometry_stl, speed_ms):
-    """Copy template → run_dir, write combined geometry STL, patch inlet speed."""
-    if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
+def create_daily_run_dir():
+    """Creates a sequentially numbered, date-based run directory."""
+    project_root = Path(__file__).resolve().parent
+    base_dir = project_root / 'optimization_runs'
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+    existing_dirs = [d for d in base_dir.glob(f'{today_str}_*') if d.is_dir()]
+    next_num = 1
+    for d in existing_dirs:
+        try:
+            num = int(d.name.split('_')[-1])
+            if num >= next_num:
+                next_num = num + 1
+        except ValueError:
+            pass
+            
+    run_dir = base_dir / f'{today_str}_{next_num:02d}'
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir.resolve()
+
+
+def setup_case(geometry_stl, speed_ms, run_dir=None):
+    """Create daily run dir (or use provided), copy template, write STL, patch inlet speed."""
+    if run_dir is None:
+        run_dir = create_daily_run_dir()
+    else:
+        run_dir = Path(run_dir)
+        if run_dir.exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    (run_dir / 'case.foam').touch()
 
     shutil.copytree(TEMPLATE_DIR, run_dir,
                     copy_function=shutil.copy,
-                    ignore_dangling_symlinks=True)
+                    ignore_dangling_symlinks=True,
+                    dirs_exist_ok=True)
 
     tri_dir = run_dir / 'constant' / 'triSurface'
     tri_dir.mkdir(parents=True, exist_ok=True)
 
-    # Single combined ASCII STL — hull + domain walls (all named solids)
+    # 1. STL COMBINING STEP (Fixing the Ghost Hull)
+    # The geometry_stl string natively contains BOTH the boat hull and the 
+    # bounding box domain explicitly unified into a single ASCII STL file.
+    # cfMesh requires them in the same file to properly recognize the hull patch!
     (tri_dir / 'geometry.stl').write_text(geometry_stl)
 
     # Patch velocity in 0/U
@@ -359,6 +393,7 @@ def setup_case(run_dir, geometry_stl, speed_ms):
         txt,
     )
     u_file.write_text(txt)
+    return run_dir
 
 
 def modify_control_dict(case_dir, settings):
@@ -462,27 +497,112 @@ def run_cfmesh_pipeline(case_dir):
     if not stl_path.exists(): raise FileNotFoundError(f"STL file not found at {stl_path}")
     _run_foam_utility('surfaceFeatureEdges', f'surfaceFeatureEdges -angle 15 {stl_path.name} {fms_path.name}', cwd=tri_surface_dir)
     mesh_dict_path = case_dir / 'system' / 'meshDict'
-    md_text = mesh_dict_path.read_text()
-    md_text, count = re.subn(r'(surfaceFile\s+)"[^"]+"', rf'\1"constant/triSurface/{fms_path.name}"', md_text)
-    refinement_box = f"\nobjectRefinements\n{{\n    waterline\n    {{\n        type        box;\n        min         ({DOMAIN_BOUNDS['xn']} {DOMAIN_BOUNDS['yn']} -0.05);\n        max         ({DOMAIN_BOUNDS['xx']} {DOMAIN_BOUNDS['yx']} 0.05);\n        cellSize    0.005;\n    }}\n}}\n"
-    if 'objectRefinements' not in md_text: md_text = md_text.replace('\n// ************************************************************************* //', refinement_box + '\n// ************************************************************************* //', 1)
-    mesh_dict_path.write_text(md_text)
-    _run_foam_utility('cartesianMesh', 'cartesianMesh', cwd=case_dir)
 
-    # Relax checkMesh strictness to allow slightly skewed faces from automated meshing
-    mq_dict = case_dir / 'system' / 'meshQualityDict'
-    mq_dict.write_text("""FoamFile
-{
+    cx = (DOMAIN_BOUNDS['xx'] + DOMAIN_BOUNDS['xn']) / 2.0
+    cy = (DOMAIN_BOUNDS['yx'] + DOMAIN_BOUNDS['yn']) / 2.0
+    cz = 0.0
+    lx = DOMAIN_BOUNDS['xx'] - DOMAIN_BOUNDS['xn']
+    ly = DOMAIN_BOUNDS['yx'] - DOMAIN_BOUNDS['yn']
+    lz = 0.07
+    
+    # Dynamically scale the nested wake box dimensions (converting mm to m)
+    boat_l = LWL / 1000.0
+    boat_beam = (DEFAULTS['p3_hb'] * 2.0) / 1000.0
+    boat_draft = DEFAULTS['p3_d'] / 1000.0
+    
+    inner_lx = boat_l * 1.5
+    inner_ly = boat_beam * 2.0
+    inner_lz = boat_draft * 4.0
+
+    outer_lx = boat_l * 3.0
+    outer_ly = boat_beam * 4.0
+    outer_lz = boat_draft * 8.0
+
+    # Shift the boxes longitudinally so they center on the boat instead of the bow
+    # This pushes the back half of the boxes out to cover the stern and the wake
+    box_cx = boat_l / 2.0
+
+    md_text = f"""FoamFile
+{{
     version     2.0;
     format      ascii;
     class       dictionary;
-    object      meshQualityDict;
-}
-maxNonOrthogonality 75;
-maxSkewness 20;
-""")
+    object      meshDict;
+}}
 
-    _run_foam_utility('checkMesh', 'checkMesh -latestTime', cwd=case_dir, check_log_for='Mesh OK')
+surfaceFile     "constant/triSurface/{fms_path.name}";
+
+// Global Coarse Grid
+maxCellSize     0.40;
+
+localRefinement
+{{
+    // Far-Field Fix: Force boundary patches to remain coarse
+    "(inlet|outlet|atmosphere|bottom|front|back)"
+    {{
+        cellSize    0.40;
+    }}
+    
+    // Hull Surface & Grading
+    hull
+    {{
+        cellSize                    0.02;
+        additionalRefinementLevels  3;
+    }}
+}}
+
+objectRefinements
+{{
+    // Waterline Refinement
+    waterline
+    {{
+        type        box;
+        cellSize    0.02;
+        centre      ({cx} {cy} {cz});
+        lengthX     {lx};
+        lengthY     {ly};
+        lengthZ     {lz};
+    }}
+    
+    // Inner Wake Box
+    wakeBoxInner
+    {{
+        type        box;
+        cellSize    0.05;
+        centre      ({box_cx} 0 0);
+        lengthX     {inner_lx};
+        lengthY     {inner_ly};
+        lengthZ     {inner_lz};
+    }}
+
+    // Outer Wake Box
+    wakeBoxOuter
+    {{
+        type        box;
+        cellSize    0.15;
+        centre      ({box_cx} 0 0);
+        lengthX     {outer_lx};
+        lengthY     {outer_ly};
+        lengthZ     {outer_lz};
+    }}
+}}
+
+// Mesh Quality Settings for cfMesh
+meshQualitySettings
+{{
+    maxNonOrthogonality     70;
+    maxSkewness             8;
+    minTetQuality           -1e30;
+}}
+"""
+    mesh_dict_path.write_text(md_text)
+    _run_foam_utility('cartesianMesh', 'cartesianMesh', cwd=case_dir)
+
+    try:
+        _run_foam_utility('checkMesh', 'checkMesh -latestTime', cwd=case_dir)
+    except RuntimeError:
+        print('  [Warning] checkMesh reported imperfect quality (e.g., highly skewed faces). Proceeding anyway.')
+        
     (case_dir / f'{case_dir.name}.foam').touch()
     patch_boundary_conditions(case_dir)
     print('--- cfMesh Pipeline Finished ---')
@@ -498,6 +618,59 @@ def run_case(run_dir, n_procs=DEFAULT_N_PROCS):
     _run_foam_utility('interFoam', f'mpirun --use-hwthread-cpus -np {n_procs} interFoam -parallel', cwd=run_dir)
     _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
     print('--- interFoam Simulation Finished ---\n')
+
+
+def run_lts_simulation(case_dir, n_cores=DEFAULT_N_PROCS):
+    """Run steady-state Local Time Stepping (LTS) simulation for faster optimization."""
+    case_dir = Path(case_dir)
+    run_cfmesh_pipeline(case_dir)
+    print('\n--- Starting interFoam (LTS mode) Simulation ---')
+
+    # 1. Modify controlDict settings for LTS
+    modify_control_dict(case_dir, {
+        'application': 'interFoam',
+        'endTime': '2000',
+        'deltaT': '1',
+        'writeControl': 'timeStep',
+        'writeInterval': '2000'
+    })
+
+    # 2. Modify fvSchemes to use localEuler for ddtSchemes
+    fv_schemes_path = case_dir / 'system' / 'fvSchemes'
+    if fv_schemes_path.exists():
+        content = fv_schemes_path.read_text()
+        content, count = re.subn(
+            r'(ddtSchemes\s*\{[^}]*?default\s+)[^;]+(;)',
+            r'\g<1>localEuler\2',
+            content
+        )
+        if count > 0:
+            print("  fvSchemes: Set ddtSchemes default to localEuler")
+        fv_schemes_path.write_text(content)
+
+    # 3. Execution Pipeline
+    _run_foam_utility('setFields', 'setFields', cwd=case_dir)
+    set_decompose_subdomains(case_dir, n_cores)
+    _run_foam_utility('decomposePar', 'decomposePar -force', cwd=case_dir)
+
+    print(f'  Starting interFoam (LTS mode) on {n_cores} cores (streaming output to terminal)...')
+    mpirun_path = shutil.which('mpirun')
+    if not mpirun_path:
+        raise FileNotFoundError("mpirun not found. Is OpenMPI installed?")
+    
+    solver_path = find_openfoam_exe('interFoam')
+    lib_dir = Path(solver_path).parent.parent / 'lib'
+    
+    run_cmd = f'{mpirun_path} --use-hwthread-cpus -np {n_cores} {solver_path} -parallel'
+    full_cmd = f'{OF}; export LD_LIBRARY_PATH="{lib_dir}:$LD_LIBRARY_PATH"; {run_cmd}'
+    
+    try:
+        subprocess.check_call(['bash', '--norc', '--noprofile', '-c', full_cmd], cwd=case_dir)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f'interFoam (LTS mode) failed with exit code {e.returncode}')
+
+    _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=case_dir)
+    print('--- interFoam (LTS mode) Simulation Finished ---\n')
 
 
 def extract_drag(run_dir):
@@ -532,9 +705,8 @@ def extract_drag(run_dir):
 
 # ── Optuna objective ────────────────────────────────────────────
 def make_objective(base_params, speed_ms, log_rows, fast=False,
-                   work_dir=None, log_file=None, n_procs=DEFAULT_N_PROCS):
+                   log_file=None, n_procs=DEFAULT_N_PROCS):
     import optuna
-    _work_dir = work_dir or WORK_DIR
     _log_file = log_file or LOG_FILE
 
     def objective(trial):
@@ -560,7 +732,6 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
         params['p1_hz'] = 0.0
 
         n       = trial.number + 1
-        run_dir = _work_dir / f'run_{n:04d}'
 
         print(f'\n{"="*55}  Trial {n}  |  {speed_ms:.2f} m/s ({speed_ms*1.944:.1f} kn)')
         for name in SEARCH_SPACE:
@@ -581,7 +752,7 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
             stl_nx = 60 if fast else 250
             stl_nt = 24 if fast else 100
             geom = build_geometry_stl(params, N_X=stl_nx, N_T=stl_nt)
-            setup_case(run_dir, geom, speed_ms)
+            run_dir = setup_case(geom, speed_ms)
             if fast:
                 apply_fast_mode(run_dir, end_time=FAST_END_TIME)
             run_case(run_dir, n_procs=n_procs)
@@ -663,9 +834,7 @@ def main():
     study_name = ('moth_hull_fast' if args.fast else STUDY_NAME) + tag_suffix
     study_db   = ROOT / ((f'optuna_study_fast{tag_suffix}.db')      if args.fast else f'optuna_study{tag_suffix}.db')
     log_file   = ROOT / ((f'optimization_log_fast{tag_suffix}.csv') if args.fast else f'optimization_log{tag_suffix}.csv')
-    work_dir   = Path.home() / ((f'openfoam_runs_fast{tag_suffix}') if args.fast else f'openfoam_runs{tag_suffix}')
     best_file  = ROOT / (f'best_hull{tag_suffix}.json' if args.tag else BEST_FILE.name)
-    work_dir.mkdir(parents=True, exist_ok=True)
 
     base     = load_base_params()
     log_rows = pd.read_csv(log_file).to_dict('records') if log_file.exists() else []
@@ -674,10 +843,9 @@ def main():
     if args.eval_best:
         print('\nRunning single evaluation on best config...')
         params  = {**base}
-        run_dir = WORK_DIR / 'run_eval_best'
         try:
             geom = build_geometry_stl(params)
-            setup_case(run_dir, geom, args.speed)
+            run_dir = setup_case(geom, args.speed)
             run_case(run_dir, n_procs=args.n_procs)
             drag = extract_drag(run_dir)
             print(f'\nDrag for best config: {drag:.3f} N')
@@ -708,8 +876,7 @@ def main():
     print(f'Params      : {list(SEARCH_SPACE.keys())}\n')
 
     objective = make_objective(base, args.speed, log_rows, fast=args.fast,
-                               work_dir=work_dir, log_file=log_file,
-                               n_procs=args.n_procs)
+                               log_file=log_file, n_procs=args.n_procs)
     while progress['complete'] < args.n_trials:
         remaining = args.n_trials - progress['complete']
         print(f'Running up to {remaining} more Optuna attempts to reach {args.n_trials} completed trials...')

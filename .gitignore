@@ -40,3 +40,6 @@ optimization_log_fast_laptop30_20260402_constraints_trial_11.json
 optimization_log_fast_laptop30_20260402_constraints_trial_20.json
 optuna_study_fast.db
 optuna_study_fast_laptop30_20260402_constraints.db
+
+# CFD Results
+optimization_runs/
