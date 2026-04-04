@@ -307,21 +307,25 @@ def export_dxf_lines_plan(filepath, params, n_wl=6, n_pts=80):
     x_sample = np.linspace(0.0, lwl, 120)
 
     for z_lev in z_levels:
-        stbd = []
-        for xi in x_sample:
-            hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
-            depth = float(lagrange([xi], ctrl_x, keel_d,
-                                   clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
-            dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
-            dz_   = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
-            kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
-            hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
-            ys, zs = cross_section_spline(hb, depth, dhb, dz_, kw, 50, hb_z=hz)
-            for k in range(len(zs) - 1):
-                if (zs[k] - z_lev) * (zs[k + 1] - z_lev) <= 0:
-                    f = (z_lev - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
-                    stbd.append((xi, float(ys[k] + f * (ys[k + 1] - ys[k]))))
-                    break
+        if abs(z_lev - z_levels[-1]) < 1e-9:
+            stbd = [(float(xi), float(yi))
+                    for xi, yi in zip(x_sample, lagrange(x_sample, ctrl_x, keel_w_c, clip_min=0.0))]
+        else:
+            stbd = []
+            for xi in x_sample:
+                hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
+                depth = float(lagrange([xi], ctrl_x, keel_d,
+                                       clip_min=0.0, clip_max=float(MAX_DEPTH))[0])
+                dhb   = float(lagrange([xi], ctrl_x, deck_hb_c, clip_min=0.0)[0])
+                dz_   = float(lagrange([xi], sheer_ctrl_x, sheer_z_ext, clip_min=0.0)[0])
+                kw    = float(lagrange([xi], ctrl_x, keel_w_c,  clip_min=0.0)[0])
+                hz    = float(lagrange([xi], ctrl_x, hb_z_c)[0])
+                ys, zs = cross_section_spline(hb, depth, dhb, dz_, kw, 50, hb_z=hz)
+                for k in range(len(zs) - 1):
+                    if (zs[k] - z_lev) * (zs[k + 1] - z_lev) <= 0:
+                        f = (z_lev - zs[k]) / (zs[k + 1] - zs[k] + 1e-12)
+                        stbd.append((xi, float(ys[k] + f * (ys[k + 1] - ys[k]))))
+                        break
         if not stbd:
             continue
         color = 4 if abs(z_lev) < 1.0 else 1
