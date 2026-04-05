@@ -32,6 +32,9 @@ lines_plan.dxf
 # Claude internal
 .claude/
 
+# OpenCode internal
+.opencode/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -41,3 +44,5 @@ optimization_log_fast_laptop30_20260402_constraints_trial_20.json
 optuna_study_fast.db
 optuna_study_fast_laptop30_20260402_constraints.db
 optimization_log_fast_laptop30_20260402_constraints_trial_30.json
+AGENTS.md
+opencode.json

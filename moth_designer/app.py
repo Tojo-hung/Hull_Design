@@ -36,6 +36,7 @@ from .config import (
 from .geometry import (
     lagrange, cross_section_spline, build_ctrl, beam_eval,
     displaced_volume, find_disp_waterline, hydrostatic_coefficients, build_3d_mesh,
+    section_area_full_from_section,
 )
 from .exports import export_txt, export_stl, export_step, export_dxf_sections, export_dxf_lines_plan
 
@@ -1248,21 +1249,49 @@ class MothDesigner(QMainWindow):
         self._b_transom.setData(-ty_tr, tz_tr)
 
         # ── Displacement waterline ──────────────────────────
-        deck_kw = dict(deck_x=ctrl_x, deck_hb_arr=deck_hb_c,
-                       sheer_z_arr=sheer_z_c, keel_w_arr=keel_w_c, hb_z_arr=hb_z_c)
-
-        # Total hull volume: integrate up to the highest sheer point
+        # Performance: find_disp_waterline() calls displaced_volume() many times,
+        # and displaced_volume() rebuilds section splines each time. For the live
+        # GUI we precompute the section curves once and reuse them across the
+        # bisection iterations.
         max_sheer_z = float(np.max(sheer_z_c))
-        total_vol = displaced_volume(max_sheer_z, ctrl_x, beam_hb,
-                                     ctrl_x, keel_d,
-                                     n_x=PREVIEW_WL_NX, n_section=PREVIEW_WL_SECTION_N,
-                                     **deck_kw)
+        x_v = np.linspace(0.0, float(LWL), PREVIEW_WL_NX)
+        hb_v = beam_eval(x_v, ctrl_x, beam_hb)
+        depth_v = lagrange(x_v, ctrl_x, keel_d, clip_min=0.0, clip_max=float(MAX_DEPTH))
+        sheer_v = lagrange(x_v, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
+        kw_v = lagrange(x_v, ctrl_x, keel_w_c, clip_min=0.0)
+        hz_v = lagrange(x_v, ctrl_x, hb_z_c)
+        sec_v = [
+            cross_section_spline(hb_v[i], depth_v[i], None, sheer_v[i], kw_v[i],
+                                 PREVIEW_WL_SECTION_N, hb_z=hz_v[i])
+            for i in range(len(x_v))
+        ]
 
-        # Waterline z where cumulative volume (from keel up) = target
-        dz = find_disp_waterline(TARGET_DISP_L, ctrl_x, beam_hb,
-                                 ctrl_x, keel_d,
-                                 n_x=PREVIEW_WL_NX, n_section=PREVIEW_WL_SECTION_N,
-                                 max_iter=PREVIEW_WL_BISECT_ITERS, **deck_kw)
+        def _vol_l_at(z_wl: float) -> float:
+            areas = np.array(
+                [section_area_full_from_section(ys, zs, z_wl) for ys, zs in sec_v],
+                dtype=float,
+            )
+            return float(np.trapezoid(areas, x_v)) / 1e6
+
+        total_vol = _vol_l_at(max_sheer_z)
+
+        lo = -float(MAX_DEPTH)
+        hi = max_sheer_z
+        vol_hi = _vol_l_at(hi)
+        if vol_hi <= float(TARGET_DISP_L):
+            dz = hi
+        else:
+            vol_lo = _vol_l_at(lo)
+            if vol_lo >= float(TARGET_DISP_L):
+                dz = lo
+            else:
+                for _ in range(PREVIEW_WL_BISECT_ITERS):
+                    mid = (lo + hi) / 2.0
+                    if _vol_l_at(mid) < float(TARGET_DISP_L):
+                        lo = mid
+                    else:
+                        hi = mid
+                dz = (lo + hi) / 2.0
 
         self._p_disp_wl.setPos(dz)
         if total_vol < TARGET_DISP_L:

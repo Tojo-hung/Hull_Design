@@ -228,6 +228,15 @@ def section_area_full(hb, depth, deck_hb, deck_z, keel_w, z_wl, hb_z=0.0, n=60):
     return 2.0 * _section_area_half_below(ys, zs, z_wl)
 
 
+def section_area_full_from_section(ys, zs, z_wl):
+    """Full section area (both sides) below z_wl from cached section arrays.
+
+    This is a small performance helper for GUI paths that precompute
+    `(ys, zs)` once and then evaluate many waterlines.
+    """
+    return 2.0 * _section_area_half_below(ys, zs, z_wl)
+
+
 def displaced_volume(z_wl, beam_x, beam_hb, keel_x, keel_d,
                      deck_x=None, deck_hb_arr=None, sheer_z_arr=None,
                      keel_w_arr=None, hb_z_arr=None, n_x=200, n_section=60):
