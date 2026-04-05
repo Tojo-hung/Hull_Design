@@ -11,7 +11,7 @@ Usage:
 
 Available Tests:
     - archimedes: Checks if buoyant force matches displacement weight (at U=0). comand: python3 physics_validator.py --test archimedes
-    - grid:       Runs a 3-level grid convergence study on drag.
+    - grid:       Runs a 3-level grid convergence study on drag. comand: python3 physics_validator.py --test grid
     - steady:     Checks if the drag force stabilizes over a long run.
     - sweep:      Sweeps a design parameter to check for a smooth drag landscape.
     - ittc:       Validates skin friction against the theoretical ITTC-1957 line.
@@ -163,13 +163,26 @@ def run_grid_convergence():
         geom = build_geometry_stl(DEFAULTS)
         setup_case(geom, speed_ms=U_SIM, run_dir=run_dir)
 
-        mesh_dict_path = run_dir / 'system' / 'meshDict'
-        content = mesh_dict_path.read_text()
-        content = re.sub(r'((?:maxCell|boundaryCell|cellSize|maxFirstLayerThickness)\w*\s+)(\S+);',
-                         lambda m: f"{m.group(1)}{float(m.group(2))*scale:.4f};", content)
-        mesh_dict_path.write_text(content)
+        import hull_optimizer
+        original_run_foam = hull_optimizer._run_foam_utility
 
-        run_lts_simulation(run_dir, N_CORES)
+        # Intercept cfMesh execution to scale the dynamically generated meshDict
+        def intercept_foam_utility(utility, cmd, cwd=None):
+            if utility == 'cartesianMesh':
+                mesh_dict_path = Path(cwd) / 'system' / 'meshDict'
+                if mesh_dict_path.exists():
+                    content = mesh_dict_path.read_text()
+                    content = re.sub(r'((?:maxCell|boundaryCell|cellSize|maxFirstLayerThickness)\w*\s+)(\S+);',
+                                     lambda m: f"{m.group(1)}{float(m.group(2))*scale:.4f};", content)
+                    mesh_dict_path.write_text(content)
+            return original_run_foam(utility, cmd, cwd=cwd)
+
+        hull_optimizer._run_foam_utility = intercept_foam_utility
+        try:
+            run_lts_simulation(run_dir, N_CORES)
+        finally:
+            hull_optimizer._run_foam_utility = original_run_foam
+
         forces, _ = parse_forces(run_dir)
         checkmesh_log = (run_dir / 'log.checkMesh').read_text()
         cell_count = int(re.search(r'cells:\s+(\d+)', checkmesh_log).group(1))
