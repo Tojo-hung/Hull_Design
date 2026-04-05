@@ -11,12 +11,13 @@ Usage:
 
 Available Tests:
     - archimedes: Checks if buoyant force matches displacement weight (at U=0). comand: python3 physics_validator.py --test archimedes
-    - grid:       Runs a 3-level grid convergence study on drag. comand: python3 physics_validator.py --test grid
+    - grid:       Runs a multi-level grid convergence study on drag. comand: python3 physics_validator.py --test grid
     - steady:     Checks if the drag force stabilizes over a long run.
     - sweep:      Sweeps a design parameter to check for a smooth drag landscape.
     - ittc:       Validates skin friction against the theoretical ITTC-1957 line.
 """
 import argparse
+import datetime
 import re
 import shutil
 import sys
@@ -44,7 +45,7 @@ from moth_designer.config import DEFAULTS, TARGET_DISP_L, LWL
 
 # --- Global Constants --------------------------------------------------------
 RUNS_DIR = ROOT / 'validation_runs'
-N_CORES = 8
+N_CORES = 10
 
 # Physical constants for water at 20°C
 RHO = 998.2      # kg/m^3
@@ -152,47 +153,40 @@ def run_archimedes_check():
     print("="*70 + "\n")
 
 def run_grid_convergence():
-    """Runs the same simulation on 3 different mesh densities."""
+    """Runs the same simulation on a few different mesh densities."""
     print("\n" + "="*70 + "\n--- V&V Test 2: Grid Convergence Study ---\n" + "="*70)
-    mesh_levels = {'coarse': 1.25, 'medium': 1.0, 'fine': 0.80}
+    mesh_levels = {'coarse': 1.25, 'medium': 1.0, 'less_fine': 0.90, 'fine': 0.80, 'very_fine': 0.65, 'extremely_fine': 0.50}
     results = []
 
+    batch_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    batch_dir = RUNS_DIR / f"grid_batch_{batch_id}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Assigning Batch ID: {batch_id}. All runs will be saved in: {batch_dir.name}")
+
     for i, (name, scale) in enumerate(mesh_levels.items()):
-        run_dir = create_daily_run_dir()
+        run_dir = batch_dir / name
+        run_dir.mkdir(exist_ok=True)
+
         print(f"\n--- [{i+1}/{len(mesh_levels)}] Starting mesh level: {name.upper()} (scale={scale}) ---")
         geom = build_geometry_stl(DEFAULTS)
         setup_case(geom, speed_ms=U_SIM, run_dir=run_dir)
 
-        import hull_optimizer
-        original_run_foam = hull_optimizer._run_foam_utility
-
-        # Intercept cfMesh execution to scale the dynamically generated meshDict
-        def intercept_foam_utility(utility, cmd, cwd=None):
-            if utility == 'cartesianMesh':
-                mesh_dict_path = Path(cwd) / 'system' / 'meshDict'
-                if mesh_dict_path.exists():
-                    content = mesh_dict_path.read_text()
-                    content = re.sub(r'((?:maxCell|boundaryCell|cellSize|maxFirstLayerThickness)\w*\s+)(\S+);',
-                                     lambda m: f"{m.group(1)}{float(m.group(2))*scale:.4f};", content)
-                    mesh_dict_path.write_text(content)
-            return original_run_foam(utility, cmd, cwd=cwd)
-
-        hull_optimizer._run_foam_utility = intercept_foam_utility
-        try:
-            run_lts_simulation(run_dir, N_CORES)
-        finally:
-            hull_optimizer._run_foam_utility = original_run_foam
+        # Use the native scaling support from the main pipeline
+        run_lts_simulation(run_dir, N_CORES, scale=scale)
 
         forces, _ = parse_forces(run_dir)
         checkmesh_log = (run_dir / 'log.checkMesh').read_text()
         cell_count = int(re.search(r'cells:\s+(\d+)', checkmesh_log).group(1))
-        results.append({'level': name, 'drag': forces['drag'], 'cells': cell_count})
+        results.append({
+            'level': name, 'drag': forces['drag'], 'cells': cell_count,
+            'pressure': abs(forces['pressure_x']), 'viscous': abs(forces['viscous_x'])
+        })
 
     print("\n--- Grid Convergence Results ---")
-    print(f"{'Level':<10} {'Cell Count':<15} {'Drag (N)':<10}")
-    print("-"*40)
+    print(f"{'Level':<15} {'Cell Count':<15} {'Total Drag':<12} {'Pressure':<12} {'Viscous':<12}")
+    print("-" * 70)
     for res in results:
-        print(f"{res['level']:<10} {res['cells']:,d}{'':<5} {res['drag']:.3f}")
+        print(f"{res['level']:<15} {res['cells']:<15,d} {res['drag']:<12.3f} {res['pressure']:<12.3f} {res['viscous']:<12.3f}")
     print("="*70 + "\n")
 
 def run_steady_state_check():
@@ -304,7 +298,7 @@ if __name__ == "__main__":
         choices=test_choices.keys(),
         help="Select the validation test to run:\n" +
              "  archimedes: Checks if buoyant force matches displacement weight.\n" +
-             "  grid:       Runs a 3-level grid convergence study.\n" +
+             "  grid:       Runs a multi-level grid convergence study.\n" +
              "  steady:     Checks if the drag force stabilizes over time.\n" +
              "  sweep:      Sweeps a parameter to check for a smooth drag landscape.\n" +
              "  ittc:       Validates skin friction against the ITTC-1957 formula."

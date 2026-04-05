@@ -41,8 +41,13 @@ CONFIG_FILE  = ROOT / 'hull_design.json'
 STUDY_DB     = ROOT / 'optuna_study.db'
 STUDY_NAME   = 'moth_hull'
 
-DEFAULT_N_PROCS = 16
+RUNS_DIR     = ROOT / 'optimization_runs'
+SESSION_BATCH_ID = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+SESSION_BATCH_DIR = RUNS_DIR / f'opt_batch_{SESSION_BATCH_ID}'
+
+DEFAULT_N_PROCS = 10
 FAST_END_TIME = 0.5
+GLOBAL_MESH_SCALE = 1.0
 OF      = 'source $(ls -1 /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc 2>/dev/null | tail -n 1) 2>/dev/null'
 
 DOMAIN_BOUNDS = {
@@ -336,25 +341,14 @@ def apply_fast_mode(run_dir, end_time=FAST_END_TIME):
 
 
 def create_daily_run_dir():
-    """Creates a sequentially numbered, date-based run directory."""
-    project_root = Path(__file__).resolve().parent
-    base_dir = project_root / 'optimization_runs'
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    """Creates a sequential run directory inside the master batch folder for this session."""
+    SESSION_BATCH_DIR.mkdir(parents=True, exist_ok=True)
     
-    existing_dirs = [d for d in base_dir.glob(f'{today_str}_*') if d.is_dir()]
-    next_num = 1
-    for d in existing_dirs:
-        try:
-            num = int(d.name.split('_')[-1])
-            if num >= next_num:
-                next_num = num + 1
-        except ValueError:
-            pass
-            
-    run_dir = base_dir / f'{today_str}_{next_num:02d}'
-    run_dir.mkdir(parents=True, exist_ok=True)
+    existing_runs = [d for d in SESSION_BATCH_DIR.iterdir() if d.is_dir() and d.name.startswith('run_')]
+    count = len(existing_runs) + 1
+    
+    run_dir = SESSION_BATCH_DIR / f'run_{count:03d}'
+    run_dir.mkdir(exist_ok=True)
     return run_dir.resolve()
 
 
@@ -493,8 +487,82 @@ def set_decompose_subdomains(case_dir, n_procs):
         decompose_path.write_text(content)
         print(f'  decomposeParDict: Set numberOfSubdomains to {n_procs}')
 
+def cleanup_case_files(run_dir):
+    """
+    Consolidates forces into a single force.dat file and cleans up redundant OpenFOAM 
+    time directories/processors to ensure only ONE file is made and disk space is saved.
+    """
+    run_dir = Path(run_dir)
+    
+    # 1. Consolidate postProcessing force files into ONE file per run
+    post_dir = run_dir / 'postProcessing'
+    if post_dir.exists():
+        for forces_dir in post_dir.glob('forces*'):
+            if not forces_dir.is_dir():
+                continue
+                
+            def get_t(p):
+                try: return float(p.parent.name)
+                except ValueError: return -1.0
+                
+            force_files = sorted(forces_dir.rglob('force*.dat'), key=get_t)
+            if force_files:
+                rows_dict = {}
+                header = []
+                for f in force_files:
+                    for line in f.read_text().splitlines():
+                        if line.startswith('#'):
+                            if not header:
+                                header.append(line)
+                            elif len(header) < 10 and line not in header:
+                                header.append(line)
+                            continue
+                        if not line.strip():
+                            continue
+                        try:
+                            time_val = float(line.split()[0])
+                            rows_dict[time_val] = line
+                        except ValueError:
+                            pass
+                            
+                if rows_dict:
+                    master_content = '\n'.join(header) + '\n'
+                    for t in sorted(rows_dict.keys()):
+                        master_content += rows_dict[t] + '\n'
+                        
+                    # Write to a unified directory
+                    out_dir = forces_dir / '0'
+                    out_dir.mkdir(exist_ok=True)
+                    master_file = out_dir / 'force.dat'
+                    master_file.write_text(master_content)
+                    
+                    # Delete all other redundant time directories inside forces
+                    for sub in forces_dir.iterdir():
+                        if sub.is_dir() and sub.name != '0':
+                            shutil.rmtree(sub, ignore_errors=True)
+                    for f in out_dir.iterdir():
+                        if f.name != 'force.dat':
+                            f.unlink()
+                            
+    # 2. Cleanup redundant simulation time directories & processor folders
+    for proc in run_dir.glob('processor*'):
+        shutil.rmtree(proc, ignore_errors=True)
+        
+    time_dirs = []
+    for d in run_dir.iterdir():
+        if d.is_dir():
+            try:
+                time_dirs.append((float(d.name), d))
+            except ValueError:
+                pass
+                
+    time_dirs.sort()
+    # Keep only 0 and the latest simulation time
+    if len(time_dirs) > 2:
+        for t, d in time_dirs[1:-1]:
+            shutil.rmtree(d, ignore_errors=True)
 
-def run_cfmesh_pipeline(case_dir):
+def run_cfmesh_pipeline(case_dir, scale=1.0):
     print('\n--- Starting Professional cfMesh Pipeline ---')
     case_dir = Path(case_dir)
     tri_surface_dir = case_dir / 'constant' / 'triSurface'
@@ -602,6 +670,15 @@ meshQualitySettings
 }}
 """
     mesh_dict_path.write_text(md_text)
+
+    if scale != 1.0:
+        md_content = mesh_dict_path.read_text()
+        def scale_match(match):
+            val = float(match.group(2)) * scale
+            return f"{match.group(1)}{val:.4f};"
+        md_content = re.sub(r'((?:maxCellSize|boundaryCellSize|cellSize)\s+)(\S+);', scale_match, md_content)
+        mesh_dict_path.write_text(md_content)
+
     _run_foam_utility('cartesianMesh', 'cartesianMesh', cwd=case_dir)
 
     try:
@@ -614,9 +691,9 @@ meshQualitySettings
     print('--- cfMesh Pipeline Finished ---')
 
 
-def run_case(run_dir, n_procs=DEFAULT_N_PROCS):
+def run_case(run_dir, n_procs=DEFAULT_N_PROCS, scale=1.0):
     """Run the full CFD simulation for a given case directory."""
-    run_cfmesh_pipeline(run_dir)
+    run_cfmesh_pipeline(run_dir, scale=scale)
     print('\n--- Starting interFoam Simulation ---')
     _run_foam_utility('setFields', 'setFields', cwd=run_dir)
     set_decompose_subdomains(run_dir, n_procs)
@@ -624,12 +701,13 @@ def run_case(run_dir, n_procs=DEFAULT_N_PROCS):
     _run_foam_utility('interFoam', f'mpirun --use-hwthread-cpus -np {n_procs} interFoam -parallel', cwd=run_dir)
     _run_foam_utility('reconstructPar', 'reconstructPar -latestTime', cwd=run_dir)
     print('--- interFoam Simulation Finished ---\n')
+    cleanup_case_files(run_dir)
 
 
-def run_lts_simulation(case_dir, n_cores=DEFAULT_N_PROCS):
+def run_lts_simulation(case_dir, n_cores=DEFAULT_N_PROCS, scale=1.0):
     """Run steady-state Local Time Stepping (LTS) simulation for faster optimization."""
     case_dir = Path(case_dir)
-    run_cfmesh_pipeline(case_dir)
+    run_cfmesh_pipeline(case_dir, scale=scale)
     print('\n--- Starting interFoam (LTS mode) Simulation ---')
 
     # 1. Modify controlDict settings for LTS
@@ -680,6 +758,7 @@ def run_lts_simulation(case_dir, n_cores=DEFAULT_N_PROCS):
     except RuntimeError:
         print("  reconstructPar failed (likely no write times). Skipping visual reconstruction.")
     print('--- interFoam (LTS mode) Simulation Finished ---\n')
+    cleanup_case_files(case_dir)
 
 
 def extract_drag(run_dir):
@@ -714,7 +793,7 @@ def extract_drag(run_dir):
 
 # ── Optuna objective ────────────────────────────────────────────
 def make_objective(base_params, speed_ms, log_rows, fast=False,
-                   log_file=None, n_procs=DEFAULT_N_PROCS):
+                   log_file=None, n_procs=DEFAULT_N_PROCS, scale=1.0):
     import optuna
     _log_file = log_file or LOG_FILE
 
@@ -764,7 +843,7 @@ def make_objective(base_params, speed_ms, log_rows, fast=False,
             run_dir = setup_case(geom, speed_ms)
             if fast:
                 apply_fast_mode(run_dir, end_time=FAST_END_TIME)
-            run_case(run_dir, n_procs=n_procs)
+            run_case(run_dir, n_procs=n_procs, scale=scale)
             drag   = extract_drag(run_dir)
             status = 'ok'
             print(f'  -> Drag = {drag:.3f} N')
@@ -830,6 +909,8 @@ def main():
                     help='MPI ranks for interFoam (default 16 for 8C/16T laptop)')
     ap.add_argument('--tag',       type=str, default='',
                     help='Optional suffix for study/log/work dirs so a run starts cleanly')
+    ap.add_argument('--scale',     type=float, default=GLOBAL_MESH_SCALE,
+                    help=f'Mesh scaling factor (default {GLOBAL_MESH_SCALE}, smaller is finer)')
     args = ap.parse_args()
 
     try:
@@ -855,7 +936,7 @@ def main():
         try:
             geom = build_geometry_stl(params)
             run_dir = setup_case(geom, args.speed)
-            run_case(run_dir, n_procs=args.n_procs)
+            run_case(run_dir, n_procs=args.n_procs, scale=args.scale)
             drag = extract_drag(run_dir)
             print(f'\nDrag for best config: {drag:.3f} N')
         except Exception as e:
@@ -885,7 +966,7 @@ def main():
     print(f'Params      : {list(SEARCH_SPACE.keys())}\n')
 
     objective = make_objective(base, args.speed, log_rows, fast=args.fast,
-                               log_file=log_file, n_procs=args.n_procs)
+                               log_file=log_file, n_procs=args.n_procs, scale=args.scale)
     while progress['complete'] < args.n_trials:
         remaining = args.n_trials - progress['complete']
         print(f'Running up to {remaining} more Optuna attempts to reach {args.n_trials} completed trials...')
