@@ -40,7 +40,8 @@ _PT = [
 DEFAULTS = dict(transom_half_beam=195.0, transom_draft=65.0,
                 transom_sheer=200.0, transom_keel_w=100.0,
                 transom_hb_z=0.0,
-                bow_draft=75.0, bow_sheer=150.0)
+                bow_draft=75.0, bow_sheer=150.0,
+                bow_half_beam=1.0)
 for _i, (_px, _pb, _pd) in enumerate(_PT, 1):
     DEFAULTS[f'p{_i}_x']  = float(_px)
     DEFAULTS[f'p{_i}_hb'] = float(_pb)

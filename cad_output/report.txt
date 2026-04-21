@@ -1,0 +1,14 @@
+CAD proof-path report
+Source: defaults
+
+HullCADResult
+  valid         : True
+  volume        : 370.07 L  (370073653 mm³)
+  faces         : 5
+  loft stations : 40
+  warnings      : none
+
+Build time: 7.57s
+STEP: cad_output\hull.step
+Raw STL: cad_output\hull_raw.stl
+CFD STL: cad_output\hull_cfd.stl

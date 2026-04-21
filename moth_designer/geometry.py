@@ -120,10 +120,30 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
     t      = np.concatenate([[0.0], np.cumsum(chords)])
     if t[-1] <= 1e-12:
         ys, zs = _bounded_bilge()
+        cs_z   = None
     else:
         t /= t[-1]
+
+        # Enforce minimum spacing at interior knot: when the flat-keel segment
+        # is very short relative to the bilge arc, the first knot lands very
+        # close to t=0.  A CubicSpline through a nearly-degenerate first
+        # interval can produce overshoots in Y even with clamped BCs.
+        # Redistributing so t[1] ≥ 0.15 keeps the knot spacing balanced.
+        if keel_w > 0 and len(t) == 3 and t[1] < 0.15:
+            t = np.array([0.0, 0.15, 1.0])
+
+        # Y: clamped at both ends (dY/dt = 0).
+        #   • At the keel the curve departs vertically (Y not yet changing).
+        #   • At the max-beam the curve arrives vertically — dy/dt=0 means the
+        #     2-D tangent is purely in the Z direction, giving G1 continuity
+        #     with the vertical topside segment that follows.
         cs_y = CubicSpline(t, key_y, bc_type=((1, 0.0), (1, 0.0)))
-        cs_z = CubicSpline(t, key_z, bc_type='natural')
+
+        # Z: not-a-knot (scipy default).  Enforces C3 continuity across the
+        # interior knot, which is more stable than 'natural' for the 3-point
+        # flat-keel case and avoids a curvature discontinuity at the keel edge.
+        # Falls back to a single cubic for the 2-point V-keel case (no knot).
+        cs_z = CubicSpline(t, key_z)   # default bc_type = 'not-a-knot'
 
         if keel_w > 0:
             t_flat  = t[1]
@@ -141,11 +161,16 @@ def cross_section_spline(hb, depth, deck_hb=None, deck_z=None, keel_w=0.0, n=80,
             ys[flat] = np.linspace(0.0, keel_w, flat.sum())
             zs[flat] = -depth
 
-        # Slender bow sections can overshoot badly; fall back only when needed.
+        # Safety net: fall back only when the spline is still non-physical.
         if np.max(ys) > hb + 1e-6 or np.min(ys) < -1e-6 or np.any(np.diff(ys) < -1e-6):
             ys, zs = _bounded_bilge()
+            cs_z   = None
 
-    # Straight vertical topside.
+    # Topside: straight vertical strip from max-beam to deck edge.
+    # Y is constant at hb; Z increases linearly to deck_z.
+    # G1 continuity in direction is already satisfied: the bilge spline
+    # has dY/dt = 0 at t=1 (clamped BC), so the tangent at the knuckle
+    # is purely vertical — matching the topside's direction exactly.
     y_top = np.full(n_top, hb)
     z_top = np.linspace(hb_z, deck_z, n_top)
 
@@ -173,8 +198,9 @@ def build_ctrl(p):
     sdz = raw_dz[order]; skw = raw_kw[order];  shz = raw_hz[order]
 
     ctrl_x  = np.concatenate([[0.0],            sx, [float(LWL)]])
-    # Default to a true point bow unless an explicit bow half-beam override is provided.
-    beam_hb = np.concatenate([[float(p.get('bow_half_beam', 0.0))], shb, [float(t_hb)]])
+    # Default to a 1 mm bow half-beam so the entry stays nearly pointed
+    # while avoiding a fully degenerate section for downstream consumers.
+    beam_hb = np.concatenate([[float(p.get('bow_half_beam', 1.0))], shb, [float(t_hb)]])
     keel_d  = np.concatenate([[float(b_draft)], sd,  [float(t_draft)]])
     deck_hb = beam_hb.copy()   # deck width == half-beam at every station
     sheer_z = np.concatenate([[p['bow_sheer']], sdz, [p['transom_sheer']]])
@@ -372,6 +398,105 @@ def block_coefficient(*args, **kwargs):
     return hydrostatic_coefficients(*args, **kwargs)
 
 
+def resample_section_with_landmarks(ys, zs, N_T, keel_w, hb, n_bilge_src):
+    """Resample a section profile to N_T points using arc-length spacing,
+    anchoring the bilge-knuckle landmark to a proportional output index.
+
+    This is the discrete-mesh equivalent of guide-curve lofting: the bilge
+    knuckle (max-beam point) always lands at the same proportional output
+    position across all sections, so consecutive sections correspond
+    correctly in 3-D regardless of their shape differences.
+
+    Two-interval strategy (keel→bilge_knuckle and bilge_knuckle→deck):
+    Points are distributed proportionally within each interval by arc-length.
+    This avoids the compressed spacing that arises when a keel-flat landmark
+    is added as a third, very short interval on narrow bow sections.
+
+    Parameters
+    ----------
+    ys, zs       : section profile from cross_section_spline  (length n_src)
+    N_T          : desired output point count
+    keel_w       : flat keel half-width for this section (mm) — retained for
+                   future use; not used in the two-interval scheme
+    hb           : design half-beam for this section (mm) — retained for
+                   future use
+    n_bilge_src  : number of points in the bilge sub-array in (ys, zs).
+                   Index n_bilge_src-1 is the bilge-knuckle / max-beam point.
+
+    Returns
+    -------
+    yr, zr : resampled profile, shape (N_T,), dtype float32
+    """
+    n_src = len(ys)
+
+    # ── Arc-length parameter for the source profile ────────────────
+    ds = np.sqrt(np.diff(ys.astype(float))**2 + np.diff(zs.astype(float))**2)
+    s  = np.concatenate([[0.0], np.cumsum(ds)])
+    if s[-1] < 1e-9:
+        t = np.linspace(0.0, 1.0, n_src)
+        yr = np.interp(np.linspace(0, 1, N_T), t, ys.astype(float)).astype(np.float32)
+        zr = np.interp(np.linspace(0, 1, N_T), t, zs.astype(float)).astype(np.float32)
+        return yr, zr
+    s /= s[-1]   # normalise to [0, 1]
+
+    # ── Bilge-knuckle arc-length position ──────────────────────────
+    bk_src = min(max(n_bilge_src - 1, 0), n_src - 2)
+    s_bk   = float(s[bk_src])   # arc-length fraction at bilge knuckle
+
+    # ── Fixed output index for the bilge knuckle (proportional) ───
+    bk_out = max(1, min(N_T - 2, round(N_T * s_bk)))
+
+    # ── Two uniform arc-length sub-arrays, joined at the knuckle ──
+    # Pre-allocate and fill slices: indices 0..bk_out from keel to knuckle,
+    # indices bk_out..N_T-1 from knuckle to deck.  The overlap at bk_out is
+    # the shared knuckle value written by both slices (both yield s_bk there).
+    s_new             = np.empty(N_T, dtype=float)
+    s_new[:bk_out+1]  = np.linspace(0.0,  s_bk, bk_out + 1)
+    s_new[bk_out:]    = np.linspace(s_bk, 1.0,  N_T - bk_out)
+
+    yr = np.interp(s_new, s, ys.astype(float)).astype(np.float32)
+    zr = np.interp(s_new, s, zs.astype(float)).astype(np.float32)
+    return yr, zr
+
+
+def build_guide_curves(params, n_x=200):
+    """Return the four anatomical guide curves as dense (n_x, 3) arrays.
+
+    Guide curves are 3-D longitudinal curves that trace specific anatomical
+    features along the hull length.  They are derived entirely from the
+    existing PCHIP parameter fields — no new parameters are required.
+
+    Returns
+    -------
+    xs              : (n_x,)   x-stations (bow=0, transom=LWL), mm
+    keel_cl         : (n_x,3)  keel centreline  (x,  0,    -depth)
+    keel_edge       : (n_x,3)  keel flat edge   (x,  kw,   -depth)
+    bilge_knuckle   : (n_x,3)  max-beam point   (x,  hb,    hb_z)
+    sheer_edge      : (n_x,3)  deck edge        (x,  hb,    sheer)
+    """
+    ctrl_x, beam_hb_arr, keel_d, deck_hb_arr, sheer_z_arr, keel_w_arr, \
+        hb_z_arr, _order, _sx, _shb, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
+
+    xs = np.linspace(0.0, float(LWL), n_x)
+
+    depths = lagrange(xs, ctrl_x, keel_d, clip_min=0.0, clip_max=float(MAX_DEPTH))
+    hbs    = beam_eval(xs, ctrl_x, beam_hb_arr)
+    kws    = lagrange(xs, ctrl_x, keel_w_arr,   clip_min=0.0)
+    hzs    = lagrange(xs, ctrl_x, hb_z_arr)
+    sheers = lagrange(xs, sheer_ctrl_x, sheer_z_ext, clip_min=0.0)
+
+    kws = np.minimum(kws, hbs)   # keel width cannot exceed half-beam
+
+    zeros = np.zeros(n_x)
+
+    keel_cl       = np.column_stack([xs, zeros,  -depths])
+    keel_edge     = np.column_stack([xs, kws,    -depths])
+    bilge_knuckle = np.column_stack([xs, hbs,     hzs])
+    sheer_edge    = np.column_stack([xs, hbs,     sheers])
+
+    return xs, keel_cl, keel_edge, bilge_knuckle, sheer_edge
+
+
 _BOW_MESH_RECT_HALF_BEAM = 0.5  # mm - tiny STL/GL starter face to avoid zero-area bow triangles
 
 
@@ -391,11 +516,14 @@ def _bow_mesh_starter_section(depth, deck_z, half_beam, n=40):
 def build_3d_mesh(params, N_X=80, N_T=36):
     """Return (verts float32 (V,3), faces int32 (F,3)) for GLMeshItem."""
     ctrl_x, beam_hb, keel_d, deck_hb, sheer_z, keel_w, hb_z_arr, _, _, _, sheer_ctrl_x, sheer_z_ext = build_ctrl(params)
-    xs    = np.linspace(0.0, float(LWL), N_X)
-    t_new = np.linspace(0.0, 1.0, N_T)
+    xs = np.linspace(0.0, float(LWL), N_X)
 
     vs = np.zeros((N_X, N_T, 3), dtype=np.float32)
     vp = np.zeros((N_X, N_T, 3), dtype=np.float32)
+
+    _n_section = 40
+    _n_top     = max(_n_section // 5, 3)
+    _n_bilge   = _n_section - _n_top + 1
 
     for i, xi in enumerate(xs):
         hb    = float(beam_eval([xi], ctrl_x, beam_hb)[0])
@@ -406,13 +534,16 @@ def build_3d_mesh(params, N_X=80, N_T=36):
         kw    = float(lagrange([xi], ctrl_x, keel_w,   clip_min=0.0)[0])
         hz    = float(lagrange([xi], ctrl_x, hb_z_arr)[0])
         if i == 0:
-            bow_half_beam = max(hb, float(params.get('bow_mesh_half_beam', _BOW_MESH_RECT_HALF_BEAM)))
-            ys, zs = _bow_mesh_starter_section(depth, dz, bow_half_beam, n=40)
+            # Bow: use the actual bilge shape (same as all other sections) scaled
+            # to the design bow half-beam.  This gives a topologically consistent
+            # cap section — same curve family, just very narrow — so the ruled
+            # quad from bow to first real section has no topology jump.
+            bow_hb = max(float(params.get('bow_half_beam', _BOW_MESH_RECT_HALF_BEAM)), 0.5)
+            ys, zs = cross_section_spline(bow_hb, depth, None, dz, 0.0, _n_section, hb_z=hz)
+            yr, zr = resample_section_with_landmarks(ys, zs, N_T, 0.0, bow_hb, _n_bilge)
         else:
-            ys, zs = cross_section_spline(hb, depth, None, dz, kw, 40, hb_z=hz)
-        t_src  = np.linspace(0.0, 1.0, len(ys))
-        yr = np.interp(t_new, t_src, ys).astype(np.float32)
-        zr = np.interp(t_new, t_src, zs).astype(np.float32)
+            ys, zs = cross_section_spline(hb, depth, None, dz, kw, _n_section, hb_z=hz)
+            yr, zr = resample_section_with_landmarks(ys, zs, N_T, kw, hb, _n_bilge)
         vs[i] = np.column_stack([np.full(N_T, xi, np.float32), yr,  zr])
         vp[i] = np.column_stack([np.full(N_T, xi, np.float32), -yr, zr])
 

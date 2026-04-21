@@ -362,6 +362,7 @@ class MothDesigner(QMainWindow):
 
     def _build_input_panel(self):
         t = THEMES[self._theme_name]
+        current_value = lambda key: self.params.get(key, DEFAULTS[key])
         panel = QWidget()
         panel.setFixedWidth(310)
         outer = QVBoxLayout(panel)
@@ -422,7 +423,7 @@ class MothDesigner(QMainWindow):
                 ('_d',  '#ff6b6b', 0,   MAX_DEPTH),
             ]:
                 key  = f'p{i}{suffix}'
-                edit = make_field(DEFAULTS[key], color, theme=t)
+                edit = make_field(current_value(key), color, theme=t)
                 edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
                 edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
                 self.inputs[key] = edit
@@ -473,7 +474,7 @@ class MothDesigner(QMainWindow):
                 ('_hz', '#ffaa33', -100, 100),
             ]:
                 key  = f'p{i}{suffix}'
-                edit = make_field(DEFAULTS[key], color, theme=t)
+                edit = make_field(current_value(key), color, theme=t)
                 edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
                 edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
                 self.inputs[key] = edit
@@ -507,7 +508,7 @@ class MothDesigner(QMainWindow):
             lbl = QLabel(label)
             lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                               'border: none; background: transparent;')
-            edit = make_field(DEFAULTS[key], '#00d4aa', width=90, theme=t)
+            edit = make_field(current_value(key), '#00d4aa', width=90, theme=t)
             edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
             edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
             self.inputs[key] = edit
@@ -521,7 +522,7 @@ class MothDesigner(QMainWindow):
         lbl = QLabel('Hull draft (mm)')
         lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                           'border: none; background: transparent;')
-        edit = make_field(DEFAULTS['transom_draft'], '#00d4aa', width=90, theme=t)
+        edit = make_field(current_value('transom_draft'), '#00d4aa', width=90, theme=t)
         edit.returnPressed.connect(self._make_ends_draft_updater(edit))
         edit.editingFinished.connect(self._make_ends_draft_updater(edit))
         self.inputs['hull_draft'] = edit
@@ -555,7 +556,7 @@ class MothDesigner(QMainWindow):
             lbl = QLabel(label)
             lbl.setStyleSheet(f'color: {t["sec_label"]}; font-size: 10px;'
                               'border: none; background: transparent;')
-            edit = make_field(DEFAULTS[key], '#00d4aa', width=90, theme=t)
+            edit = make_field(current_value(key), '#00d4aa', width=90, theme=t)
             edit.returnPressed.connect(self._make_updater(key, vmin, vmax))
             edit.editingFinished.connect(self._make_updater(key, vmin, vmax))
             self.inputs[key] = edit
@@ -953,11 +954,19 @@ class MothDesigner(QMainWindow):
         self.status.showMessage(f'Exported: {path}', 5000)
 
     def _export_stl(self):
-        from PyQt5.QtWidgets import QFileDialog
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        try:
+            import cadquery  # noqa
+        except ImportError:
+            QMessageBox.warning(self, 'Missing library',
+                                'cadquery not installed.\n\nRun:  pip install cadquery')
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, 'Export STL', 'moth_hull.stl', 'STL files (*.stl)')
         if not path:
             return
+        self.status.showMessage('Generating STL \xe2\x80\x94 please wait...', 0)
+        QApplication.processEvents()
         export_stl(path, dict(self.params))
         self.status.showMessage(f'Exported: {path}', 5000)
 
@@ -1112,6 +1121,10 @@ class MothDesigner(QMainWindow):
         lines.append(
             f"                transom_sheer={p['transom_sheer']:.1f},"
             f" transom_keel_w={p['transom_keel_w']:.1f},"
+        )
+        lines.append(
+            f"                transom_hb_z={p.get('transom_hb_z', 0.0):.1f},"
+            f" bow_half_beam={p.get('bow_half_beam', 1.0):.1f},"
         )
         lines.append(
             f"                bow_draft={p['bow_draft']:.1f},"

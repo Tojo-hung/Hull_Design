@@ -87,9 +87,9 @@ Important desktop/optimizer notes:
 - The desktop geometry model has 4 internal stations, not 5.
 - Desktop deck half-beam is not an independent parameter. In
   `moth_designer.geometry.build_ctrl()`, `deck_hb` is derived from `beam_hb`.
-- `bow_half_beam` is an optional hidden override supported by
-  `moth_designer.geometry.build_ctrl()`, but it is not part of the standard
-  defaults or desktop UI.
+- `bow_half_beam` is a hidden desktop parameter supported by
+  `moth_designer.geometry.build_ctrl()`. The desktop defaults now set it to
+  `1.0` mm even though the desktop UI still does not expose it.
 - `bow_mesh_half_beam` is a separate hidden mesh-only override used to avoid a
   zero-area first mesh strip at the bow.
 
